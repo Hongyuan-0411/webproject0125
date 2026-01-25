@@ -574,7 +574,8 @@ async function handler(req, res) {
         musicStyle, 
         musicVoice, 
         pictureBookStyle, 
-        characterType 
+        characterType,
+        characterName
       } = body;
 
       if (!userGoal || typeof userGoal !== 'string' || userGoal.trim().length === 0) {
@@ -589,7 +590,8 @@ async function handler(req, res) {
           musicStyle || '欢快',
           musicVoice || '男生',
           pictureBookStyle || '童话',
-          characterType || '男生'
+          characterType || '男生',
+          characterName || '乐乐'
         );
 
         // 调用通义千问LLM
@@ -680,17 +682,45 @@ async function handler(req, res) {
           totalSteps || 1
         );
 
-        // 调用通义千问LLM
-        const lyrics = await callQwenLLM([
+        // 调用通义千问LLM（要求返回严格JSON：{ fixed_prefix, steps_lyrics[4] }）
+        const raw = await callQwenLLM([
           {
             role: 'user',
             content: lyricsPrompt,
           },
         ]);
 
+        let parsed;
+        try {
+          parsed = JSON.parse(String(raw).trim());
+        } catch (e) {
+          throw new Error('完整歌曲歌词返回不是合法JSON，请检查prompt或模型输出：' + (e?.message || e));
+        }
+
+        const fixedPrefix = String(parsed?.fixed_prefix || '').trim();
+        const stepsLyrics = parsed?.steps_lyrics;
+
+        if (!Array.isArray(stepsLyrics) || stepsLyrics.length !== 4) {
+          throw new Error('完整歌曲歌词JSON格式错误：steps_lyrics 必须为长度=4的数组');
+        }
+
+        const normalizedStepsLyrics = stepsLyrics.map((s, idx) => {
+          const line = String(s ?? '').trim();
+          if (!line) throw new Error(`第${idx + 1}步歌词为空`);
+          if (/[\r\n]/.test(line)) throw new Error(`第${idx + 1}步歌词包含换行符（不允许）`);
+          if (fixedPrefix && !line.startsWith(fixedPrefix)) {
+            throw new Error(`第${idx + 1}步歌词未以固定句头“${fixedPrefix}”开头`);
+          }
+          return line;
+        });
+
+        const fullLyrics = normalizedStepsLyrics.join('\n');
+
         return send(res, 200, {
           success: true,
-          lyrics: lyrics.trim(),
+          fixed_prefix: fixedPrefix,
+          steps_lyrics: normalizedStepsLyrics,
+          full_lyrics: fullLyrics,
         });
       } catch (e) {
         console.error(`[${nowIso()}] Generate lyrics error:`, e);
@@ -734,17 +764,46 @@ async function handler(req, res) {
           finalMusicVoice
         );
 
-        // 调用通义千问LLM
-        const lyrics = await callQwenLLM([
+        // 调用通义千问LLM（要求返回严格JSON：{ fixed_prefix, steps_lyrics[4] }）
+        const raw = await callQwenLLM([
           {
             role: 'user',
             content: lyricsPrompt,
           },
         ]);
 
+        let parsed;
+        try {
+          parsed = JSON.parse(String(raw).trim());
+        } catch (e) {
+          console.error(`[${nowIso()}] Generate complete song JSON parse error. Raw:`, raw);
+          throw new Error('完整歌曲歌词返回不是合法JSON，请检查prompt或模型输出：' + (e?.message || e));
+        }
+
+        const fixedPrefix = String(parsed?.fixed_prefix || '').trim();
+        const stepsLyrics = parsed?.steps_lyrics;
+
+        if (!Array.isArray(stepsLyrics) || stepsLyrics.length !== 4) {
+          throw new Error('完整歌曲歌词JSON格式错误：steps_lyrics 必须为长度=4的数组');
+        }
+
+        const normalizedStepsLyrics = stepsLyrics.map((s, idx) => {
+          const line = String(s ?? '').trim();
+          if (!line) throw new Error(`第${idx + 1}步歌词为空`);
+          if (/[\r\n]/.test(line)) throw new Error(`第${idx + 1}步歌词包含换行符（不允许）`);
+          if (fixedPrefix && !line.startsWith(fixedPrefix)) {
+            throw new Error(`第${idx + 1}步歌词未以固定句头“${fixedPrefix}”开头`);
+          }
+          return line;
+        });
+
+        const fullLyrics = normalizedStepsLyrics.join('\n');
+
         return send(res, 200, {
           success: true,
-          lyrics: lyrics.trim(),
+          fixed_prefix: fixedPrefix,
+          steps_lyrics: normalizedStepsLyrics,
+          full_lyrics: fullLyrics,
         });
       } catch (e) {
         console.error(`[${nowIso()}] Generate complete song error:`, e);
