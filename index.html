@@ -3238,6 +3238,18 @@
       // 更新 sessionId
       currentSessionId = sessionId;
 
+      // 导入历史记录后：把音频 URL 注入全局播放器（与步骤切换解耦）
+      try {
+        const importedAudioUrl = stepContents?.find(c => c && c.audioUrl && !c.audioError)?.audioUrl;
+        if (importedAudioUrl) {
+          ensureGlobalAudioSource(importedAudioUrl);
+          initGlobalAudioIfNeeded();
+          updateGlobalAudioUI();
+        }
+      } catch (e) {
+        console.warn('导入历史记录后设置全局音频失败:', e);
+      }
+
       // 更新角色名称输入框（如果历史记录中有角色名称）
       if (decomposedData.character_name) {
         $('characterName').value = decomposedData.character_name;
