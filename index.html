@@ -1298,20 +1298,20 @@
     if (!url) return;
     initGlobalAudioIfNeeded();
 
+    // 关键：切步骤时只切 UI，不要对音频做任何会触发重缓冲/重解码的操作。
+    // 之前这里会在每个步骤渲染时调用，并把 globalAudio.src 反复改成“当前步骤的音频”。
+    // 如果正在播放另一首音频，这会造成短暂暂停（甚至重新加载）。
     if (globalAudioSrc !== url) {
       const wasPlaying = globalAudio && !globalAudio.paused;
-      const t = globalAudio ? globalAudio.currentTime : 0;
 
       globalAudioSrc = url;
       globalAudio.src = url;
 
-      try {
-        globalAudio.currentTime = t;
-      } catch (_) {
-        // ignore
-      }
+      // 不要尝试在切源时保留 currentTime：跨音频没有意义，还可能触发额外 seek。
+      // 需要从旧时间点续播的场景，应在同一 src 内 seek。
 
       if (wasPlaying) {
+        // 仅在“原本就在播放”的情况下尝试续播；避免无意间触发自动播放策略。
         globalAudio.play().catch(() => {});
       }
     }
