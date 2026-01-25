@@ -588,7 +588,7 @@ async function handler(req, res) {
           userGoal.trim(),
           learningFocus || '',
           musicStyle || '欢快',
-          musicVoice || '男生',
+          musicVoice,
           pictureBookStyle || '童话',
           characterType || '男生',
           characterName || '乐乐'
@@ -677,7 +677,7 @@ async function handler(req, res) {
           step,
           characterName,
           musicStyle || '欢快',
-          musicVoice || '男生',
+          (musicVoice && String(musicVoice).trim()) ? String(musicVoice).trim() : '男生',
           stepNumber || 1,
           totalSteps || 1
         );
@@ -748,7 +748,7 @@ async function handler(req, res) {
       try {
         // 验证并记录参数
         const finalMusicStyle = musicStyle || '欢快';
-        const finalMusicVoice = musicVoice || '男生';
+        const finalMusicVoice = (musicVoice && String(musicVoice).trim()) ? String(musicVoice).trim() : '男生';
         console.log(`[${nowIso()}] Generate complete song - 使用参数:`, {
           musicStyle: finalMusicStyle,
           musicVoice: finalMusicVoice,
