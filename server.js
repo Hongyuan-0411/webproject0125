@@ -698,6 +698,146 @@ async function handler(req, res) {
       }
     }
 
+    // API: 生成完整歌曲歌词（包含所有4个步骤）
+    if (req.method === 'POST' && url.pathname === '/api/generate-complete-song') {
+      if (!DASHSCOPE_API_KEY) {
+        return send(res, 500, { error: 'DASHSCOPE_API_KEY not configured' });
+      }
+
+      const body = await readJson(req);
+      const { steps, characterName, musicStyle, musicVoice } = body;
+
+      if (!steps || !Array.isArray(steps) || steps.length !== 4) {
+        return send(res, 400, { error: 'steps must be an array with exactly 4 steps' });
+      }
+
+      if (!characterName) {
+        return send(res, 400, { error: 'characterName is required' });
+      }
+
+      try {
+        // 验证并记录参数
+        const finalMusicStyle = musicStyle || '欢快';
+        const finalMusicVoice = musicVoice || '男生';
+        console.log(`[${nowIso()}] Generate complete song - 使用参数:`, {
+          musicStyle: finalMusicStyle,
+          musicVoice: finalMusicVoice,
+          characterName,
+          stepsCount: steps.length
+        });
+
+        // 使用提示词工程生成完整歌曲歌词提示词
+        const lyricsPrompt = prompts.getCompleteSongLyricsPrompt(
+          steps,
+          characterName,
+          finalMusicStyle,
+          finalMusicVoice
+        );
+
+        // 调用通义千问LLM
+        const lyrics = await callQwenLLM([
+          {
+            role: 'user',
+            content: lyricsPrompt,
+          },
+        ]);
+
+        return send(res, 200, {
+          success: true,
+          lyrics: lyrics.trim(),
+        });
+      } catch (e) {
+        console.error(`[${nowIso()}] Generate complete song error:`, e);
+        return send(res, 502, { error: String(e.message || e) });
+      }
+    }
+
+    // API: 生成组合图片（包含4个小图的大图）
+    if (req.method === 'POST' && url.pathname === '/api/generate-combined-image') {
+      if (!DASHSCOPE_API_KEY) {
+        return send(res, 500, { error: 'DASHSCOPE_API_KEY not configured' });
+      }
+
+      const body = await readJson(req);
+      const { steps, characterName, characterDescription, characterSheet, pictureBookStyle } = body;
+
+      if (!steps || !Array.isArray(steps) || steps.length !== 4) {
+        return send(res, 400, { error: 'steps must be an array with exactly 4 steps' });
+      }
+
+      if (!characterName) {
+        return send(res, 400, { error: 'characterName is required' });
+      }
+
+      try {
+        // 验证并记录参数
+        const finalPictureBookStyle = pictureBookStyle || '柔和水彩扁平';
+        console.log(`[${nowIso()}] Generate combined image - 使用参数:`, {
+          pictureBookStyle: finalPictureBookStyle,
+          characterName,
+          hasCharacterSheet: !!characterSheet,
+          stepsCount: steps.length
+        });
+
+        // 使用提示词工程生成组合图片提示词
+        const imagePrompt = prompts.getCombinedImagePrompt(
+          steps,
+          characterName,
+          characterDescription || '',
+          characterSheet || null,
+          finalPictureBookStyle
+        );
+
+        // 调用图片生成API
+        const response = await generateImageDashScope(
+          imagePrompt.trim(),
+          '1664*928', // 固定尺寸
+          null, // 使用默认负面提示词
+          true, // prompt_extend
+          false // watermark
+        );
+
+        // 解析响应格式
+        const output = response.output;
+        if (!output) {
+          return send(res, 502, { error: 'No output in response', response });
+        }
+
+        const choices = output.choices;
+        if (!choices || !Array.isArray(choices) || choices.length === 0) {
+          return send(res, 502, { error: 'No choices in output', response });
+        }
+
+        const firstChoice = choices[0];
+        const message = firstChoice?.message;
+        if (!message) {
+          return send(res, 502, { error: 'No message in choice', response });
+        }
+
+        const content = message.content;
+        if (!content || !Array.isArray(content) || content.length === 0) {
+          return send(res, 502, { error: 'No content in message', response });
+        }
+
+        const firstContent = content[0];
+        const imageUrl = firstContent?.image;
+        
+        if (!imageUrl) {
+          return send(res, 502, { error: 'No image URL in content', response });
+        }
+
+        // 成功返回图片 URL
+        return send(res, 200, {
+          request_id: response.request_id,
+          image_url: imageUrl,
+          usage: response.usage,
+        });
+      } catch (e) {
+        console.error(`[${nowIso()}] Combined image generation error:`, e);
+        return send(res, 502, { error: String(e.message || e) });
+      }
+    }
+
     // API: 保存生成的内容（Vercel Blob + KV）
     if (req.method === 'POST' && url.pathname === '/api/save-content') {
       const body = await readJson(req);
