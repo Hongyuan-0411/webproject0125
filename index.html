@@ -197,6 +197,32 @@
       box-shadow: var(--shadow-soft);
     }
     
+    /* 全局播放器样式 */
+    .global-audio-area {
+      background: #fff;
+      border: 1px solid var(--stroke);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      margin-bottom: 14px;
+      box-shadow: var(--shadow-soft);
+      position: sticky;
+      top: 14px; /* 固定在右侧面板顶部 */
+      z-index: 10;
+    }
+
+    .global-audio-title {
+      font-weight: 700;
+      font-size: 14px;
+      margin-bottom: 8px;
+      color: var(--brand);
+    }
+
+    .global-audio-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
     .step-header h2 {
       color: var(--brand);
       margin: 0 0 8px 0;
@@ -1123,6 +1149,21 @@
 
     <!-- 右侧面板 - 80% -->
     <div class="right-panel">
+      <div id="globalAudioArea" class="global-audio-area" style="display: block;">
+        <div class="global-audio-title">🎵 正在播放</div>
+        <div id="globalAudioControls" class="global-audio-controls">
+          <button id="globalPlayBtn" class="audio-control-btn play-btn" onclick="toggleGlobalPlayPause()">▶</button>
+          <button id="globalRestartBtn" class="audio-control-btn restart" onclick="restartGlobalAudio()">⏮</button>
+          <div class="audio-progress-container">
+            <div class="audio-progress-bar" id="globalProgressBar">
+              <div class="audio-progress-fill" id="globalProgressFill" style="width: 0%;">
+                <div class="audio-progress-thumb" id="globalProgressThumb"></div>
+              </div>
+            </div>
+            <div class="audio-time" id="globalAudioTime">0:00 / 0:00</div>
+          </div>
+        </div>
+      </div>
       <div id="welcomeMessage" style="text-align: center; padding: 100px 20px; color: #999;">
         <div style="display: flex; align-items: center; justify-content: center; gap: 16px; margin-bottom: 20px;">
           <img src="yinhuixing.png" alt="音绘星" style="width: 80px; height: 80px; object-fit: contain;" />
@@ -1227,19 +1268,25 @@
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   }
 
-  function getCurrentAudioUIRefs() {
-    const i = currentStepIndex;
+  function getGlobalAudioUIRefs() {
     return {
-      playBtn: $(`playBtn${i}`),
-      progressFill: $(`progressFill${i}`),
-      audioTime: $(`audioTime${i}`),
-      progressBar: $(`progressBar${i}`),
+      area: $('globalAudioArea'),
+      playBtn: $('globalPlayBtn'),
+      progressFill: $('globalProgressFill'),
+      audioTime: $('globalAudioTime'),
+      progressBar: $('globalProgressBar'),
     };
   }
 
-  function updateCurrentAudioUI() {
+  function updateGlobalAudioUI() {
     if (!globalAudio) return;
-    const { playBtn, progressFill, audioTime } = getCurrentAudioUIRefs();
+    const { area, playBtn, progressFill, audioTime } = getGlobalAudioUIRefs();
+
+    if (area) {
+      // 有音频源时才显示全局播放器
+      // 始终显示全局播放器区域（即使还没生成音频），避免用户找不到入口
+      area.style.display = 'block';
+    }
 
     if (playBtn) {
       if (globalAudio.paused) {
@@ -1264,6 +1311,101 @@
     }
   }
 
+  function bindGlobalProgressBarIfNeeded() {
+    const { progressBar } = getGlobalAudioUIRefs();
+    if (!progressBar || progressBar.dataset.bound === '1') return;
+    progressBar.dataset.bound = '1';
+
+    const getPercentFromClientX = (clientX) => {
+      const rect = progressBar.getBoundingClientRect();
+      const x = clientX - rect.left;
+      return Math.max(0, Math.min(100, (x / rect.width) * 100));
+    };
+
+    const setProgressPercent = (pct) => {
+      if (!globalAudio || !globalAudio.duration) return;
+      pct = Math.max(0, Math.min(100, pct));
+      globalAudio.currentTime = (pct / 100) * globalAudio.duration;
+      updateGlobalAudioUI();
+    };
+
+    let isDragging = false;
+
+    progressBar.addEventListener('click', (e) => {
+      if (isDragging) return;
+      globalAudioIsSeeking = true;
+      setProgressPercent(getPercentFromClientX(e.clientX));
+      setTimeout(() => { globalAudioIsSeeking = false; }, 50);
+    });
+
+    progressBar.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      globalAudioIsSeeking = true;
+      setProgressPercent(getPercentFromClientX(e.clientX));
+
+      const onMove = (ev) => {
+        if (!isDragging) return;
+        setProgressPercent(getPercentFromClientX(ev.clientX));
+      };
+
+      const onUp = () => {
+        isDragging = false;
+        globalAudioIsSeeking = false;
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+
+    progressBar.addEventListener('touchstart', (e) => {
+      if (!e.touches || !e.touches[0]) return;
+      isDragging = true;
+      globalAudioIsSeeking = true;
+      setProgressPercent(getPercentFromClientX(e.touches[0].clientX));
+    }, { passive: true });
+
+    const onTouchMove = (e) => {
+      if (!isDragging || !e.touches || !e.touches[0]) return;
+      setProgressPercent(getPercentFromClientX(e.touches[0].clientX));
+    };
+
+    const onTouchEnd = () => {
+      if (!isDragging) return;
+      isDragging = false;
+      globalAudioIsSeeking = false;
+      document.removeEventListener('touchmove', onTouchMove);
+      document.removeEventListener('touchend', onTouchEnd);
+    };
+
+    document.addEventListener('touchmove', onTouchMove, { passive: true });
+    document.addEventListener('touchend', onTouchEnd, { passive: true });
+  }
+
+  function toggleGlobalPlayPause() {
+    if (!globalAudioSrc) return;
+    initGlobalAudioIfNeeded();
+    bindGlobalProgressBarIfNeeded();
+
+    if (!globalAudio) return;
+    if (globalAudio.paused) {
+      globalAudio.play().catch(() => {});
+    } else {
+      globalAudio.pause();
+    }
+  }
+
+  function restartGlobalAudio() {
+    if (!globalAudioSrc) return;
+    initGlobalAudioIfNeeded();
+    bindGlobalProgressBarIfNeeded();
+
+    if (!globalAudio) return;
+    try { globalAudio.currentTime = 0; } catch (_) {}
+    globalAudio.play().catch(() => {});
+  }
+
   function initGlobalAudioIfNeeded() {
     if (!globalAudio) {
       globalAudio = document.createElement('audio');
@@ -1277,20 +1419,21 @@
 
       globalAudio.addEventListener('timeupdate', () => {
         if (globalAudioIsSeeking) return;
-        updateCurrentAudioUI();
+        updateGlobalAudioUI();
       });
 
       globalAudio.addEventListener('loadedmetadata', () => {
-        updateCurrentAudioUI();
+        bindGlobalProgressBarIfNeeded();
+        updateGlobalAudioUI();
         if (globalAudioPendingAutoplay) {
           globalAudioPendingAutoplay = false;
           globalAudio.play().catch(() => {});
         }
       });
 
-      globalAudio.addEventListener('play', updateCurrentAudioUI);
-      globalAudio.addEventListener('pause', updateCurrentAudioUI);
-      globalAudio.addEventListener('ended', updateCurrentAudioUI);
+      globalAudio.addEventListener('play', updateGlobalAudioUI);
+      globalAudio.addEventListener('pause', updateGlobalAudioUI);
+      globalAudio.addEventListener('ended', updateGlobalAudioUI);
     }
   }
 
@@ -1701,106 +1844,11 @@
       }
     }
 
-    // 显示音乐（全局单例播放器：切步不影响播放状态）
+    // 显示音乐：步骤区不再承载播放器（播放器在右侧顶部全局区域），
+    // 这里仅显示“音乐已生成/失败”等状态，避免切步骤引发任何音频行为。
     if (audioEl) {
       if (content.audioUrl) {
-        ensureGlobalAudioSource(content.audioUrl);
-
-        // 只渲染控制条；播放/暂停/进度来源于 globalAudio
-        audioEl.innerHTML = `
-          <div class="audio-controls">
-            <button class="audio-control-btn play-btn" onclick="togglePlayPause(${stepIndex})" id="playBtn${stepIndex}">▶</button>
-            <button class="audio-control-btn restart" onclick="restartAudio(${stepIndex})" id="restartBtn${stepIndex}">⏮</button>
-            <div class="audio-progress-container">
-              <div class="audio-progress-bar" id="progressBar${stepIndex}">
-                <div class="audio-progress-fill" id="progressFill${stepIndex}" style="width: 0%;">
-                  <div class="audio-progress-thumb" id="progressThumb${stepIndex}"></div>
-                </div>
-              </div>
-              <div class="audio-time" id="audioTime${stepIndex}">0:00 / 0:00</div>
-            </div>
-          </div>
-        `;
-
-        // 绑定当前步骤的进度条交互（通过 clone 清理旧监听，避免切步累积）
-        const oldBar = $(`progressBar${stepIndex}`);
-        if (oldBar && globalAudio) {
-          const newBar = oldBar.cloneNode(true);
-          oldBar.parentNode.replaceChild(newBar, oldBar);
-
-          const getPercentFromClientX = (clientX) => {
-            const rect = newBar.getBoundingClientRect();
-            const x = clientX - rect.left;
-            return Math.max(0, Math.min(100, (x / rect.width) * 100));
-          };
-
-          const setProgressPercent = (pct) => {
-            if (!globalAudio || !globalAudio.duration) return;
-            pct = Math.max(0, Math.min(100, pct));
-            globalAudio.currentTime = (pct / 100) * globalAudio.duration;
-            updateCurrentAudioUI();
-          };
-
-          let isDragging = false;
-
-          newBar.addEventListener('click', (e) => {
-            if (isDragging) return;
-            globalAudioIsSeeking = true;
-            setProgressPercent(getPercentFromClientX(e.clientX));
-            setTimeout(() => { globalAudioIsSeeking = false; }, 50);
-          });
-
-          newBar.addEventListener('mousedown', (e) => {
-            isDragging = true;
-            globalAudioIsSeeking = true;
-            setProgressPercent(getPercentFromClientX(e.clientX));
-
-            const onMove = (ev) => {
-              if (!isDragging) return;
-              setProgressPercent(getPercentFromClientX(ev.clientX));
-            };
-
-            const onUp = () => {
-              isDragging = false;
-              globalAudioIsSeeking = false;
-              document.removeEventListener('mousemove', onMove);
-              document.removeEventListener('mouseup', onUp);
-            };
-
-            document.addEventListener('mousemove', onMove);
-            document.addEventListener('mouseup', onUp);
-          });
-
-          newBar.addEventListener('touchstart', (e) => {
-            if (!e.touches || !e.touches[0]) return;
-            isDragging = true;
-            globalAudioIsSeeking = true;
-            setProgressPercent(getPercentFromClientX(e.touches[0].clientX));
-          }, { passive: true });
-
-          const onTouchMove = (e) => {
-            if (!isDragging || !e.touches || !e.touches[0]) return;
-            setProgressPercent(getPercentFromClientX(e.touches[0].clientX));
-          };
-
-          const onTouchEnd = () => {
-            if (!isDragging) return;
-            isDragging = false;
-            globalAudioIsSeeking = false;
-            document.removeEventListener('touchmove', onTouchMove);
-            document.removeEventListener('touchend', onTouchEnd);
-          };
-
-          document.addEventListener('touchmove', onTouchMove, { passive: true });
-          document.addEventListener('touchend', onTouchEnd, { passive: true });
-        }
-
-        setTimeout(() => {
-          updateDownloadButtons(stepIndex, content);
-        }, 100);
-
-        // 切步后立即同步 UI 状态（不影响播放）
-        updateCurrentAudioUI();
+        audioEl.innerHTML = `<div style="text-align: center; padding: 10px 0; color: #667085;">音乐已生成，可在上方全局播放器播放</div>`;
       } else if (content.audioError) {
         audioEl.innerHTML = `<div style="text-align: center; padding: 20px; color: #b00020; display: flex; align-items: center; justify-content: center; height: 100%;">音乐生成失败：${content.audioError}</div>`;
       } else {
@@ -2084,7 +2132,12 @@
         console.error('完整歌曲音乐生成失败:', e);
       }
 
-      // 7. 将生成的内容分配给各个步骤（展示用 stepsLyrics，音频共享 audioUrl）
+      // 7. 将音频 URL 设置给全局播放器
+      if (audioUrl) {
+        ensureGlobalAudioSource(audioUrl);
+      }
+
+      // 8. 将生成的内容分配给各个步骤（展示用 stepsLyrics，音频共享 audioUrl）
       for (let i = 0; i < 4; i++) {
         stepContents[i] = {
           lyrics: stepsLyrics[i], // 每步只显示自己那一行歌词
