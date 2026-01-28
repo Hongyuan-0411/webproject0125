@@ -2214,21 +2214,30 @@
           // 左上角：步骤1 (x: 0, y: 0, w: 832, h: 464)
           canvas.width = 832;
           canvas.height = 464;
+          // 用白色作为底色，避免裁剪时把大图分隔处的黑边/透明边带进来
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, 832, 464);
           ctx.drawImage(img, 0, 0, 832, 464, 0, 0, 832, 464);
           croppedImages.push(canvas.toDataURL('image/png'));
           
           // 右上角：步骤2 (x: 832, y: 0, w: 832, h: 464)
           ctx.clearRect(0, 0, 832, 464);
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, 832, 464);
           ctx.drawImage(img, 832, 0, 832, 464, 0, 0, 832, 464);
           croppedImages.push(canvas.toDataURL('image/png'));
           
           // 左下角：步骤3 (x: 0, y: 464, w: 832, h: 464)
           ctx.clearRect(0, 0, 832, 464);
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, 832, 464);
           ctx.drawImage(img, 0, 464, 832, 464, 0, 0, 832, 464);
           croppedImages.push(canvas.toDataURL('image/png'));
           
           // 右下角：步骤4 (x: 832, y: 464, w: 832, h: 464)
           ctx.clearRect(0, 0, 832, 464);
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, 832, 464);
           ctx.drawImage(img, 832, 464, 832, 464, 0, 0, 832, 464);
           croppedImages.push(canvas.toDataURL('image/png'));
           
