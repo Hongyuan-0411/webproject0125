@@ -19,6 +19,9 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@alicloud/dypnsapi20170525": "^2.0.0",
+    "@alicloud/openapi-client": "^0.4.15",
+    "@alicloud/tea-util": "^1.4.11",
     "@vercel/blob": "^2.0.0",
     "@vercel/kv": "^3.0.0"
   }

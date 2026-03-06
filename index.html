@@ -1039,10 +1039,15 @@
 
       <div class="section" id="authGuestSection">
         <h2 style="font-size: 16px; margin-top: 0;">🔐 账号登录</h2>
-        <label>账号</label>
-        <input id="authUsername" placeholder="请输入账号" />
+        <label>手机号</label>
+        <input id="authPhone" placeholder="请输入手机号" />
         <label>密码</label>
         <input id="authPassword" type="password" placeholder="请输入密码（至少8位）" />
+        <label>验证码（仅注册需要）</label>
+        <div style="display: flex; gap: 8px;">
+          <input id="authVerifyCode" placeholder="请输入短信验证码" />
+          <button id="btnSendCode" style="margin: 0; white-space: nowrap; min-width: 116px; background: #1677ff;">发送验证码</button>
+        </div>
         <div style="display: flex; gap: 8px;">
           <button id="btnLogin" style="margin: 0; flex: 1;">登录</button>
           <button id="btnRegister" style="margin: 0; flex: 1; background: #52c41a;">注册</button>
@@ -1211,6 +1216,7 @@
   const historyPageSize = 5; // 每页显示的历史记录数量
   let authToken = localStorage.getItem('auth_token') || '';
   let currentUser = null;
+  let registerSmsOutId = '';
 
   // 全局音频播放器（单例）：确保切换步骤时音乐绝对不中断
   let globalAudio = null;
@@ -1311,6 +1317,7 @@
   function applyLoggedOutState(message = '') {
     currentUser = null;
     authToken = '';
+    registerSmsOutId = '';
     localStorage.removeItem('auth_token');
     $('authGuestSection').style.display = 'block';
     $('authUserSection').style.display = 'none';
@@ -1349,10 +1356,11 @@
   }
 
   async function registerAccount() {
-    const username = $('authUsername').value.trim();
+    const phoneNumber = $('authPhone').value.trim();
     const password = $('authPassword').value;
-    if (!username || !password) {
-      setAuthStatus('请输入账号和密码', 'err');
+    const verifyCode = $('authVerifyCode').value.trim();
+    if (!phoneNumber || !password || !verifyCode) {
+      setAuthStatus('注册需要手机号、密码和验证码', 'err');
       return;
     }
     setAuthStatus('注册中...');
@@ -1360,12 +1368,14 @@
       const resp = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ phoneNumber, password, verifyCode, outId: registerSmsOutId }),
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data?.error || '注册失败');
       applyLoggedInState(data.user, data.token, data.quota);
       $('authPassword').value = '';
+      $('authVerifyCode').value = '';
+      registerSmsOutId = '';
       setAuthStatus('注册并登录成功', 'ok');
     } catch (e) {
       setAuthStatus(`注册失败：${e?.message || e}`, 'err');
@@ -1373,10 +1383,10 @@
   }
 
   async function loginAccount() {
-    const username = $('authUsername').value.trim();
+    const phoneNumber = $('authPhone').value.trim();
     const password = $('authPassword').value;
-    if (!username || !password) {
-      setAuthStatus('请输入账号和密码', 'err');
+    if (!phoneNumber || !password) {
+      setAuthStatus('请输入手机号和密码', 'err');
       return;
     }
     setAuthStatus('登录中...');
@@ -1384,7 +1394,7 @@
       const resp = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ phoneNumber, password }),
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data?.error || '登录失败');
@@ -1393,6 +1403,43 @@
       setAuthStatus('登录成功', 'ok');
     } catch (e) {
       setAuthStatus(`登录失败：${e?.message || e}`, 'err');
+    }
+  }
+
+  async function sendSmsCode() {
+    const phoneNumber = $('authPhone').value.trim();
+    if (!phoneNumber) {
+      setAuthStatus('请输入手机号后再发送验证码', 'err');
+      return;
+    }
+    setAuthStatus('正在发送验证码...');
+    try {
+      const resp = await fetch('/api/auth/send-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phoneNumber }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || '发送失败');
+      registerSmsOutId = data?.outId || '';
+      const interval = Number(data?.interval || 60);
+      const btn = $('btnSendCode');
+      btn.disabled = true;
+      let remain = interval;
+      btn.textContent = `${remain}s后重试`;
+      const timer = setInterval(() => {
+        remain -= 1;
+        if (remain <= 0) {
+          clearInterval(timer);
+          btn.disabled = false;
+          btn.textContent = '发送验证码';
+          return;
+        }
+        btn.textContent = `${remain}s后重试`;
+      }, 1000);
+      setAuthStatus('验证码已发送，请注意查收', 'ok');
+    } catch (e) {
+      setAuthStatus(`发送失败：${e?.message || e}`, 'err');
     }
   }
 
@@ -3672,6 +3719,7 @@
   // 事件监听
   $('btnLogin').addEventListener('click', loginAccount);
   $('btnRegister').addEventListener('click', registerAccount);
+  $('btnSendCode').addEventListener('click', sendSmsCode);
   $('btnLogout').addEventListener('click', logoutAccount);
   $('btnDeleteMusic').addEventListener('click', deleteCurrentSessionMusic);
   $('btnDecompose').addEventListener('click', decomposeGoal);

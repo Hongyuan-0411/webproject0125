@@ -11,6 +11,9 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const OpenApi = require('@alicloud/openapi-client');
+const Dypnsapi20170525 = require('@alicloud/dypnsapi20170525');
+const Util = require('@alicloud/tea-util');
 const prompts = require('./prompts.js');
 
 const { put, del } = require('@vercel/blob');
@@ -51,14 +54,26 @@ const envConfig = {}; // 禁用从 api.env 读取
 const PORT = process.env.PORT || 5173;
 const BASE_URL = (process.env.BASE_URL || 'https://api.defapi.org').replace(/\/$/, '');
 const AUTH_TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 60 * 60 * 24 * 7);
-const DEFAULT_DAILY_LIMIT = Math.max(1, Number(process.env.DEFAULT_DAILY_LIMIT || 5));
+const DEFAULT_DAILY_LIMIT = Math.max(1, Number(process.env.DEFAULT_DAILY_LIMIT || 20));
 const QUOTA_TZ_OFFSET_MINUTES = Number(process.env.QUOTA_TZ_OFFSET_MINUTES || 8 * 60); // 默认按 UTC+8
 const INTERNAL_ADMIN_SECRET = String(process.env.INTERNAL_ADMIN_SECRET || '').trim();
 const TIANPUYUE_BASE_URL = 'https://api.tianpuyue.cn';
 const TIANPUYUE_API_KEY = String(process.env.TIANPUYUE_API_KEY || '').trim();
 const TIANPUYUE_MODEL = 'TemPolor v4.0';
-const TIANPUYUE_VOICE_ID = 'SV000002';
+const TIANPUYUE_VOICE_ID = 'SV000013';
 const TIANPUYUE_CALLBACK_URL = String(process.env.TIANPUYUE_CALLBACK_URL || 'https://example.com/callback').trim();
+const ALIYUN_ACCESS_KEY_ID = String(process.env.ALIYUN_ACCESS_KEY_ID || '').trim();
+const ALIYUN_ACCESS_KEY_SECRET = String(process.env.ALIYUN_ACCESS_KEY_SECRET || '').trim();
+const ALIYUN_DYPN_ENDPOINT = String(process.env.ALIYUN_DYPN_ENDPOINT || 'dypnsapi.aliyuncs.com').trim();
+const ALIYUN_SMS_SIGN_NAME = String(process.env.ALIYUN_SMS_SIGN_NAME || '').trim();
+const ALIYUN_SMS_TEMPLATE_CODE = String(process.env.ALIYUN_SMS_TEMPLATE_CODE || '').trim();
+const ALIYUN_SMS_COUNTRY_CODE = String(process.env.ALIYUN_SMS_COUNTRY_CODE || '86').trim();
+const ALIYUN_SMS_CODE_LENGTH = Math.max(4, Math.min(8, Number(process.env.ALIYUN_SMS_CODE_LENGTH || 6)));
+const ALIYUN_SMS_VALID_TIME = Math.max(60, Number(process.env.ALIYUN_SMS_VALID_TIME || 300));
+const ALIYUN_SMS_INTERVAL = Math.max(30, Number(process.env.ALIYUN_SMS_INTERVAL || 60));
+const ALIYUN_SMS_CODE_TYPE = Number(process.env.ALIYUN_SMS_CODE_TYPE || 1);
+const ALIYUN_SMS_VERIFY_MIN = String(process.env.ALIYUN_SMS_VERIFY_MIN || '5');
+const ALIYUN_SMS_DUPLICATE_POLICY = Number(process.env.ALIYUN_SMS_DUPLICATE_POLICY || 1);
 
 // ============================================
 // API Keys 配置（直接在此文件中设置）
@@ -117,6 +132,18 @@ function validateUsername(username) {
 function validatePassword(password) {
   const value = String(password || '');
   if (value.length < 8) return '密码长度至少8位';
+  return '';
+}
+
+function normalizePhoneNumber(phoneNumber) {
+  return String(phoneNumber || '').trim().replace(/\s+/g, '');
+}
+
+function validatePhoneNumber(phoneNumber) {
+  const v = normalizePhoneNumber(phoneNumber);
+  if (!v) return '手机号不能为空';
+  if (!/^\d{11}$/.test(v)) return '手机号格式错误';
+  if (!/^1\d{10}$/.test(v)) return '手机号格式错误';
   return '';
 }
 
@@ -199,6 +226,10 @@ function getTokenKey(tokenHash) {
   return `auth:token:${tokenHash}`;
 }
 
+function getPhoneOutIdKey(phoneNumber) {
+  return `auth:sms:outid:${phoneNumber}`;
+}
+
 function getQuotaUsedKey(userId, dateKey) {
   return `quota:used:${userId}:${dateKey}`;
 }
@@ -213,6 +244,77 @@ function getHistoryDataKey(userId, sessionId) {
 
 function getHistoryIndexKey(userId) {
   return `history:index:user:${userId}`;
+}
+
+let dypnsClient = null;
+function getDypnsClient() {
+  if (dypnsClient) return dypnsClient;
+  if (!ALIYUN_ACCESS_KEY_ID || !ALIYUN_ACCESS_KEY_SECRET) {
+    throw new Error('Aliyun SMS credentials are not configured');
+  }
+  const config = new OpenApi.Config({
+    accessKeyId: ALIYUN_ACCESS_KEY_ID,
+    accessKeySecret: ALIYUN_ACCESS_KEY_SECRET,
+  });
+  config.endpoint = ALIYUN_DYPN_ENDPOINT;
+  dypnsClient = new Dypnsapi20170525.default(config);
+  return dypnsClient;
+}
+
+async function sendAliyunSmsVerifyCode(phoneNumber) {
+  if (!ALIYUN_SMS_SIGN_NAME || !ALIYUN_SMS_TEMPLATE_CODE) {
+    throw new Error('ALIYUN_SMS_SIGN_NAME or ALIYUN_SMS_TEMPLATE_CODE is not configured');
+  }
+  const outId = `out_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+  const request = new Dypnsapi20170525.SendSmsVerifyCodeRequest({
+    countryCode: ALIYUN_SMS_COUNTRY_CODE,
+    phoneNumber,
+    signName: ALIYUN_SMS_SIGN_NAME,
+    templateCode: ALIYUN_SMS_TEMPLATE_CODE,
+    templateParam: JSON.stringify({ code: '##code##', min: ALIYUN_SMS_VERIFY_MIN }),
+    outId,
+    codeLength: ALIYUN_SMS_CODE_LENGTH,
+    validTime: ALIYUN_SMS_VALID_TIME,
+    duplicatePolicy: ALIYUN_SMS_DUPLICATE_POLICY,
+    interval: ALIYUN_SMS_INTERVAL,
+    codeType: ALIYUN_SMS_CODE_TYPE,
+    returnVerifyCode: false,
+  });
+  const runtime = new Util.RuntimeOptions({});
+  const client = getDypnsClient();
+  const resp = await client.sendSmsVerifyCodeWithOptions(request, runtime);
+  const body = resp?.body || {};
+  return {
+    code: body.code,
+    message: body.message,
+    success: !!body.success,
+    model: body.model || {},
+    outId,
+  };
+}
+
+async function checkAliyunSmsVerifyCode(phoneNumber, verifyCode, outId) {
+  const request = new Dypnsapi20170525.CheckSmsVerifyCodeRequest({
+    countryCode: 'cn',
+    phoneNumber,
+    verifyCode: String(verifyCode || '').trim(),
+    outId: String(outId || '').trim(),
+    caseAuthPolicy: 0,
+  });
+  const runtime = new Util.RuntimeOptions({});
+  const client = getDypnsClient();
+  const resp = await client.checkSmsVerifyCodeWithOptions(request, runtime);
+  const body = resp?.body || {};
+  const verifyResult = String(body?.model?.verifyResult || '').toUpperCase();
+  const verifyPassed = ['PASS', 'SUCCESS', 'TRUE', '1', 'OK'].includes(verifyResult);
+  return {
+    code: body.code,
+    message: body.message,
+    success: !!body.success,
+    verifyPassed,
+    verifyResult,
+    model: body.model || {},
+  };
 }
 
 async function createSessionForUser(user) {
@@ -702,27 +804,90 @@ async function handler(req, res) {
     // =========================
     // Auth APIs
     // =========================
+    if (req.method === 'POST' && url.pathname === '/api/auth/send-code') {
+      const body = await readJson(req);
+      const phoneNumber = normalizePhoneNumber(body?.phoneNumber || body?.username || '');
+      const phoneErr = validatePhoneNumber(phoneNumber);
+      if (phoneErr) return send(res, 400, { error: phoneErr });
+
+      try {
+        const sent = await sendAliyunSmsVerifyCode(phoneNumber);
+        if (!sent.success || String(sent.code || '').toUpperCase() !== 'OK') {
+          return send(res, 502, {
+            success: false,
+            error: sent.message || '发送验证码失败',
+            code: sent.code || 'ALIYUN_SMS_SEND_FAILED',
+          });
+        }
+
+        const outId = String(sent?.model?.outId || sent.outId || '');
+        if (!outId) {
+          return send(res, 502, { success: false, error: '发送验证码失败：缺少 outId' });
+        }
+
+        await kv.set(getPhoneOutIdKey(phoneNumber), outId, {
+          ex: Math.max(60, ALIYUN_SMS_VALID_TIME),
+        });
+
+        return send(res, 200, {
+          success: true,
+          message: '验证码发送成功',
+          outId,
+          validTime: ALIYUN_SMS_VALID_TIME,
+          interval: ALIYUN_SMS_INTERVAL,
+        });
+      } catch (e) {
+        console.error(`[${nowIso()}] Send SMS verify code error:`, e);
+        return send(res, 500, { error: String(e?.message || e) });
+      }
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/auth/register') {
       const body = await readJson(req);
-      const usernameRaw = String(body?.username || '').trim();
+      const phoneNumber = normalizePhoneNumber(body?.phoneNumber || body?.username || '');
       const password = String(body?.password || '');
+      const verifyCode = String(body?.verifyCode || '').trim();
+      const outIdFromBody = String(body?.outId || '').trim();
 
-      const usernameError = validateUsername(usernameRaw);
-      if (usernameError) return send(res, 400, { error: usernameError });
+      const phoneErr = validatePhoneNumber(phoneNumber);
+      if (phoneErr) return send(res, 400, { error: phoneErr });
       const passwordError = validatePassword(password);
       if (passwordError) return send(res, 400, { error: passwordError });
+      if (!verifyCode) return send(res, 400, { error: '验证码不能为空' });
 
-      const usernameNormalized = normalizeUsername(usernameRaw);
+      const usernameNormalized = normalizeUsername(phoneNumber);
       const usernameKey = getUsernameKey(usernameNormalized);
       const existingUserId = await kv.get(usernameKey);
       if (existingUserId) {
-        return send(res, 409, { error: '账号已存在' });
+        return send(res, 409, { error: '手机号已注册' });
+      }
+
+      const cachedOutId = String(await kv.get(getPhoneOutIdKey(phoneNumber)) || '');
+      const outId = outIdFromBody || cachedOutId;
+      if (!outId) {
+        return send(res, 400, { error: '验证码已过期，请重新发送' });
+      }
+
+      try {
+        const checked = await checkAliyunSmsVerifyCode(phoneNumber, verifyCode, outId);
+        if (!checked.success || String(checked.code || '').toUpperCase() !== 'OK' || !checked.verifyPassed) {
+          return send(res, 400, {
+            success: false,
+            error: checked.message || '验证码错误或已失效',
+            code: checked.code || 'ALIYUN_SMS_VERIFY_FAILED',
+            verifyResult: checked.verifyResult || '',
+          });
+        }
+      } catch (e) {
+        console.error(`[${nowIso()}] Check SMS verify code error:`, e);
+        return send(res, 500, { error: String(e?.message || e) });
       }
 
       const userId = `u_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
       const user = {
         id: userId,
-        username: usernameRaw,
+        username: phoneNumber,
+        phoneNumber,
         usernameNormalized,
         passwordHash: hashPassword(password),
         role: 'user',
@@ -734,6 +899,7 @@ async function handler(req, res) {
       // 小规模场景下做“先检查后写入”；若出现并发冲突，以最后 set 为准
       await kv.set(getUserKey(userId), user);
       await kv.set(usernameKey, userId);
+      await kv.del(getPhoneOutIdKey(phoneNumber));
 
       const session = await createSessionForUser(user);
       const quota = await getQuotaStatus(user);
@@ -748,26 +914,26 @@ async function handler(req, res) {
 
     if (req.method === 'POST' && url.pathname === '/api/auth/login') {
       const body = await readJson(req);
-      const usernameRaw = String(body?.username || '').trim();
+      const phoneNumber = normalizePhoneNumber(body?.phoneNumber || body?.username || '');
       const password = String(body?.password || '');
 
-      if (!usernameRaw || !password) {
-        return send(res, 400, { error: '账号和密码不能为空' });
+      if (!phoneNumber || !password) {
+        return send(res, 400, { error: '手机号和密码不能为空' });
       }
 
-      const usernameNormalized = normalizeUsername(usernameRaw);
+      const usernameNormalized = normalizeUsername(phoneNumber);
       const userId = await kv.get(getUsernameKey(usernameNormalized));
       if (!userId) {
-        return send(res, 401, { error: '账号或密码错误' });
+        return send(res, 401, { error: '手机号或密码错误' });
       }
 
       const user = await kv.get(getUserKey(userId));
       if (!user || user.status === 'disabled') {
-        return send(res, 401, { error: '账号或密码错误' });
+        return send(res, 401, { error: '手机号或密码错误' });
       }
 
       if (!verifyPassword(password, user.passwordHash)) {
-        return send(res, 401, { error: '账号或密码错误' });
+        return send(res, 401, { error: '手机号或密码错误' });
       }
 
       const session = await createSessionForUser(user);
