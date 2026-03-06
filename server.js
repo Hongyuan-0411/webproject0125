@@ -54,6 +54,11 @@ const AUTH_TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 60 *
 const DEFAULT_DAILY_LIMIT = Math.max(1, Number(process.env.DEFAULT_DAILY_LIMIT || 5));
 const QUOTA_TZ_OFFSET_MINUTES = Number(process.env.QUOTA_TZ_OFFSET_MINUTES || 8 * 60); // 默认按 UTC+8
 const INTERNAL_ADMIN_SECRET = String(process.env.INTERNAL_ADMIN_SECRET || '').trim();
+const TIANPUYUE_BASE_URL = 'https://api.tianpuyue.cn';
+const TIANPUYUE_API_KEY = String(process.env.TIANPUYUE_API_KEY || '').trim();
+const TIANPUYUE_MODEL = 'TemPolor v4.0';
+const TIANPUYUE_VOICE_ID = 'SV000002';
+const TIANPUYUE_CALLBACK_URL = String(process.env.TIANPUYUE_CALLBACK_URL || 'https://example.com/callback').trim();
 
 // ============================================
 // API Keys 配置（直接在此文件中设置）
@@ -463,6 +468,52 @@ async function proxyJson(req, res, targetUrl, method, bodyObj, customHeaders = {
   return send(res, 200, json);
 }
 
+async function callTianpuyueApi(pathname, payload) {
+  if (!TIANPUYUE_API_KEY) {
+    throw new Error('TIANPUYUE_API_KEY not configured');
+  }
+
+  const targetUrl = `${TIANPUYUE_BASE_URL}${pathname}`;
+  const reqBody = JSON.stringify(payload || {});
+
+  console.log(`[${nowIso()}] >>> Tianpuyue POST ${targetUrl}`);
+  console.log(`[${nowIso()}] >>> Tianpuyue body: ${reqBody}`);
+
+  const r = await fetch(targetUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': TIANPUYUE_API_KEY,
+      'Content-Type': 'application/json',
+    },
+    body: reqBody,
+  });
+
+  const text = await r.text();
+  console.log(`[${nowIso()}] <<< Tianpuyue status: ${r.status} ${r.statusText}`);
+  console.log(`[${nowIso()}] <<< Tianpuyue body: ${text}`);
+
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = { raw: text };
+  }
+
+  if (!r.ok) {
+    return {
+      ok: false,
+      httpStatus: r.status,
+      json,
+    };
+  }
+
+  return {
+    ok: true,
+    httpStatus: r.status,
+    json,
+  };
+}
+
 // DashScope 图片生成辅助函数
 function normalizeSize(size) {
   const allowed = ['1696*960', '1664*928', '1472*1140', '1328*1328', '1140*1472', '928*1664'];
@@ -790,76 +841,71 @@ async function handler(req, res) {
       const auth = await requireAuth(req, res);
       if (!auth) return;
       const body = await readJson(req);
-
+      /*
+      ===========================
+      旧 Suno 提交逻辑（保留）
+      ===========================
       // 根据 BASE_URL 判断使用哪个 API 格式
       const isGetGoAPI = BASE_URL.includes('getgoapi.com');
       const isDefAPI = BASE_URL.includes('defapi.org');
+      ...（已注释，避免删除）
+      return proxyJson(req, res, submitUrl, 'POST', payload);
+      */
 
-      let submitUrl, payload;
+      const lyrics = String(body.prompt || body.lyrics || '').trim();
+      const prompt = String(body.tags || body.title || '儿童教育歌曲，旋律朗朗上口，清晰发音').trim();
 
-      if (isGetGoAPI) {
-        // cn.getgoapi.com 格式：根据错误信息，/api/v1/generate 返回 404
-        // 可能需要使用其他端点，但根据错误信息，这个服务可能已经不支持或端点已变更
-        // 建议用户切换到 defapi.org 或检查 getgoapi.com 的最新文档
-        console.warn(`[${nowIso()}] WARNING: cn.getgoapi.com /api/v1/generate 返回 404，端点可能已变更或不支持`);
-        console.warn(`[${nowIso()}] 建议：1) 检查 getgoapi.com 的最新 API 文档 2) 切换到 defapi.org`);
-        
-        // 尝试使用 /api/v1/generate（虽然会失败，但保持代码结构）
-        submitUrl = `${BASE_URL}/api/v1/generate`;
-        const customMode = body.custom_mode ?? true;
-        payload = {
-          customMode: customMode,
-          instrumental: body.make_instrumental ?? false,
-          model: body.mv ?? 'chirp-v4-5',
-          callBackUrl: body.callback_url || 'https://example.com/callback', // 必需字段
-          prompt: body.prompt ?? '',
-        };
-        
-        // 如果开启 customMode，添加额外字段
-        if (customMode) {
-          if (body.title) payload.style = body.title; // getgoapi 使用 style 而不是 title
-          if (body.tags) payload.style = (payload.style || '') + (payload.style ? ', ' : '') + body.tags;
-        }
-        
-        console.log(`[${nowIso()}] submit payload check (getgoapi): prompt_len=${String(payload.prompt || '').length}, model=${payload.model}, customMode=${payload.customMode}, instrumental=${payload.instrumental}`);
-      } else if (isDefAPI) {
-        // api.defapi.org 格式：/api/suno/generate
-        submitUrl = `${BASE_URL}/api/suno/generate`;
-        payload = {
-          mv: body.mv ?? 'chirp-v4-5',
-          custom_mode: body.custom_mode ?? true,
-          make_instrumental: body.make_instrumental ?? false,
-          prompt: body.prompt ?? '',
-          title: body.title ?? '',
-          tags: body.tags ?? '',
-          negative_tags: body.negative_tags ?? '',
-          continue_at: body.continue_at,
-          continue_clip_id: body.continue_clip_id,
-          cover_clip_id: body.cover_clip_id,
-          callback_url: body.callback_url,
-        };
-        
-        // 移除 undefined 字段
-        Object.keys(payload).forEach(key => {
-          if (payload[key] === undefined) delete payload[key];
-        });
-        
-        console.log(`[${nowIso()}] submit payload check (defapi): prompt_len=${String(payload.prompt || '').length}, title=${payload.title}, tags=${payload.tags}, mv=${payload.mv}, custom_mode=${payload.custom_mode}`);
-      } else {
-        // 默认使用 defapi 格式
-        submitUrl = `${BASE_URL}/api/suno/generate`;
-        payload = {
-          mv: body.mv ?? 'chirp-v4-5',
-          custom_mode: body.custom_mode ?? true,
-          make_instrumental: body.make_instrumental ?? false,
-          prompt: body.prompt ?? '',
-          title: body.title ?? '',
-          tags: body.tags ?? '',
-        };
-        console.log(`[${nowIso()}] submit payload check (default): prompt_len=${String(payload.prompt || '').length}, title=${payload.title}, tags=${payload.tags}, mv=${payload.mv}`);
+      if (!lyrics) {
+        return send(res, 400, { error: 'prompt/lyrics is required' });
       }
 
-      return proxyJson(req, res, submitUrl, 'POST', payload);
+      const payload = {
+        prompt,
+        lyrics,
+        model: TIANPUYUE_MODEL, // 固定模型
+        voice_id: TIANPUYUE_VOICE_ID, // 固定歌手音色
+        // 当前阶段不做回调消费，但接口字段为必填，使用可配置占位地址
+        callback_url: TIANPUYUE_CALLBACK_URL,
+      };
+
+      const result = await callTianpuyueApi('/open-apis/v1/song/generate', payload);
+      if (!result.ok) {
+        return send(res, result.httpStatus || 502, {
+          success: false,
+          error: result?.json?.message || 'Tianpuyue submit failed',
+          upstream: result.json,
+        });
+      }
+
+      const upstream = result.json || {};
+      const statusCode = Number(upstream.status);
+      if (statusCode !== 200000) {
+        return send(res, 502, {
+          success: false,
+          error: upstream.message || 'Tianpuyue submit failed',
+          upstream,
+        });
+      }
+
+      const firstItemId = upstream?.data?.item_ids?.[0];
+      if (!firstItemId) {
+        return send(res, 502, {
+          success: false,
+          error: 'No item_id returned from Tianpuyue',
+          upstream,
+        });
+      }
+
+      // 兼容前端既有解析：优先 data.taskId / data.task_id
+      return send(res, 200, {
+        success: true,
+        data: {
+          taskId: firstItemId,
+          task_id: firstItemId,
+          item_ids: upstream?.data?.item_ids || [firstItemId],
+        },
+        upstream,
+      });
     }
 
     // API: fetch task status
@@ -868,26 +914,57 @@ async function handler(req, res) {
       if (!auth) return;
       const id = url.searchParams.get('id');
       if (!id) return send(res, 400, { error: 'missing id' });
-      
-      // 根据 BASE_URL 判断使用哪个 fetch 端点
+
+      /*
+      ===========================
+      旧 Suno 查询逻辑（保留）
+      ===========================
       const isGetGoAPI = BASE_URL.includes('getgoapi.com');
       const isDefAPI = BASE_URL.includes('defapi.org');
-      
       let fetchUrl;
-      if (isGetGoAPI) {
-        // cn.getgoapi.com 格式：尝试多个可能的端点
-        // 根据 main.py，可能的端点有：/api/v1/fetch 或 /suno/fetch
-        // 先尝试 /api/v1/fetch?id=xxx
-        fetchUrl = `${BASE_URL}/api/v1/fetch?id=${encodeURIComponent(id)}`;
-      } else if (isDefAPI) {
-        // api.defapi.org 格式：/api/task/query?task_id=xxx
-        fetchUrl = `${BASE_URL}/api/task/query?task_id=${encodeURIComponent(id)}`;
-      } else {
-        // 默认使用 defapi 格式
-        fetchUrl = `${BASE_URL}/api/task/query?task_id=${encodeURIComponent(id)}`;
-      }
-      
+      ...
       return proxyJson(req, res, fetchUrl, 'GET');
+      */
+
+      const payload = {
+        item_ids: [String(id)],
+      };
+      const result = await callTianpuyueApi('/open-apis/v1/song/query', payload);
+      if (!result.ok) {
+        return send(res, result.httpStatus || 502, {
+          success: false,
+          error: result?.json?.message || 'Tianpuyue query failed',
+          upstream: result.json,
+        });
+      }
+
+      const upstream = result.json || {};
+      const statusCode = Number(upstream.status);
+      if (statusCode !== 200000) {
+        return send(res, 502, {
+          success: false,
+          error: upstream.message || 'Tianpuyue query failed',
+          upstream,
+        });
+      }
+
+      const songs = Array.isArray(upstream?.data?.songs) ? upstream.data.songs : [];
+      const song = songs.find((s) => String(s?.item_id || '') === String(id)) || songs[0] || null;
+      const mappedStatus = String(song?.status || 'running').toLowerCase();
+
+      // 兼容前端既有逻辑：
+      // 1) statusText 读取 r.data.status
+      // 2) 音频URL读取 r.data.result[i].audio_url
+      return send(res, 200, {
+        success: true,
+        status: mappedStatus,
+        data: {
+          status: mappedStatus,
+          result: song ? [song] : [],
+          songs,
+        },
+        upstream,
+      });
     }
 
     // API: 分解用户目标为学习步骤（使用通义千问LLM）
@@ -1714,6 +1791,8 @@ server.listen(PORT, () => {
   console.log(`Proxy BASE_URL: ${BASE_URL}`);
   console.log(`Suno API Key: ${API_KEY && API_KEY.length >= 10 ? `✓ Set (${maskKey(API_KEY)})` : '✗ Not set or invalid'}`);
   console.log(`DashScope API Key: ${DASHSCOPE_API_KEY && DASHSCOPE_API_KEY.length >= 10 ? `✓ Set (${maskKey(DASHSCOPE_API_KEY)})` : '✗ Not set or invalid'}`);
+  console.log(`Tianpuyue API Key: ${TIANPUYUE_API_KEY && TIANPUYUE_API_KEY.length >= 10 ? `✓ Set (${maskKey(TIANPUYUE_API_KEY)})` : '✗ Not set or invalid'}`);
+  console.log(`Tianpuyue model: ${TIANPUYUE_MODEL}, voice_id: ${TIANPUYUE_VOICE_ID}`);
   console.log('========================================\n');
 });
 }
