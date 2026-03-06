@@ -10,9 +10,10 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const prompts = require('./prompts.js');
 
-const { put } = require('@vercel/blob');
+const { put, del } = require('@vercel/blob');
 const { kv } = require('@vercel/kv');
 
 // 读取 .env 文件的辅助函数
@@ -49,6 +50,10 @@ const envConfig = {}; // 禁用从 api.env 读取
 // 优先使用环境变量，最后使用默认值（不再使用 api.env 文件）
 const PORT = process.env.PORT || 5173;
 const BASE_URL = (process.env.BASE_URL || 'https://api.defapi.org').replace(/\/$/, '');
+const AUTH_TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 60 * 60 * 24 * 7);
+const DEFAULT_DAILY_LIMIT = Math.max(1, Number(process.env.DEFAULT_DAILY_LIMIT || 5));
+const QUOTA_TZ_OFFSET_MINUTES = Number(process.env.QUOTA_TZ_OFFSET_MINUTES || 8 * 60); // 默认按 UTC+8
+const INTERNAL_ADMIN_SECRET = String(process.env.INTERNAL_ADMIN_SECRET || '').trim();
 
 // ============================================
 // API Keys 配置（直接在此文件中设置）
@@ -91,6 +96,195 @@ function maskKey(key) {
   return key.substring(0, 4) + '...' + key.substring(key.length - 4);
 }
 
+function normalizeUsername(username) {
+  return String(username || '').trim().toLowerCase();
+}
+
+function validateUsername(username) {
+  const value = String(username || '').trim();
+  if (!value) return '账号不能为空';
+  if (value.length < 3 || value.length > 32) return '账号长度需在3到32个字符之间';
+  if (!/^[a-zA-Z0-9_-]+$/.test(value)) return '账号仅支持字母、数字、下划线和短横线';
+  return '';
+}
+
+function validatePassword(password) {
+  const value = String(password || '');
+  if (value.length < 8) return '密码长度至少8位';
+  return '';
+}
+
+function hashToken(token) {
+  return crypto.createHash('sha256').update(String(token || '')).digest('hex');
+}
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
+  return `scrypt$${salt}$${hash}`;
+}
+
+function verifyPassword(password, passwordHash) {
+  try {
+    const [algo, salt, expectedHex] = String(passwordHash || '').split('$');
+    if (algo !== 'scrypt' || !salt || !expectedHex) return false;
+    const actual = crypto.scryptSync(String(password), salt, 64);
+    const expected = Buffer.from(expectedHex, 'hex');
+    if (actual.length !== expected.length) return false;
+    return crypto.timingSafeEqual(actual, expected);
+  } catch {
+    return false;
+  }
+}
+
+function publicUser(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    role: user.role || 'user',
+    dailyLimit: Number(user.dailyLimit || DEFAULT_DAILY_LIMIT),
+    createdAt: user.createdAt,
+  };
+}
+
+function getBearerToken(req) {
+  const auth = req?.headers?.authorization || req?.headers?.Authorization;
+  if (!auth) return '';
+  const match = String(auth).match(/^Bearer\s+(.+)$/i);
+  return match ? String(match[1]).trim() : '';
+}
+
+function getQuotaDateKey(ts = Date.now()) {
+  const offsetMs = QUOTA_TZ_OFFSET_MINUTES * 60 * 1000;
+  const shifted = ts + offsetMs;
+  const d = new Date(shifted);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}${m}${day}`;
+}
+
+function getQuotaResetTimestamp(ts = Date.now()) {
+  const offsetMs = QUOTA_TZ_OFFSET_MINUTES * 60 * 1000;
+  const shifted = ts + offsetMs;
+  const d = new Date(shifted);
+  const nextMidnightShifted = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1, 0, 0, 0, 0);
+  return nextMidnightShifted - offsetMs;
+}
+
+function getQuotaResetIso(ts = Date.now()) {
+  return new Date(getQuotaResetTimestamp(ts)).toISOString();
+}
+
+function getQuotaTtlSeconds(ts = Date.now()) {
+  const diff = Math.floor((getQuotaResetTimestamp(ts) - ts) / 1000);
+  return Math.max(60, diff);
+}
+
+function getUserKey(userId) {
+  return `auth:user:${userId}`;
+}
+
+function getUsernameKey(usernameNormalized) {
+  return `auth:username:${usernameNormalized}`;
+}
+
+function getTokenKey(tokenHash) {
+  return `auth:token:${tokenHash}`;
+}
+
+function getQuotaUsedKey(userId, dateKey) {
+  return `quota:used:${userId}:${dateKey}`;
+}
+
+function getStepCacheKey(userId, sessionId, stepIndex) {
+  return `user:${userId}:session:${sessionId}:step:${stepIndex}`;
+}
+
+function getHistoryDataKey(userId, sessionId) {
+  return `history:user:${userId}:${sessionId}`;
+}
+
+function getHistoryIndexKey(userId) {
+  return `history:index:user:${userId}`;
+}
+
+async function createSessionForUser(user) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashToken(token);
+  const expiresAt = new Date(Date.now() + AUTH_TOKEN_TTL_SECONDS * 1000).toISOString();
+  await kv.set(getTokenKey(tokenHash), {
+    userId: user.id,
+    username: user.username,
+    role: user.role || 'user',
+    createdAt: nowIso(),
+    expiresAt,
+  }, { ex: AUTH_TOKEN_TTL_SECONDS });
+  return { token, expiresAt };
+}
+
+async function getAuthContext(req) {
+  const token = getBearerToken(req);
+  if (!token) return null;
+  const tokenHash = hashToken(token);
+  const session = await kv.get(getTokenKey(tokenHash));
+  if (!session || !session.userId) return null;
+  const user = await kv.get(getUserKey(session.userId));
+  if (!user || user.status === 'disabled') return null;
+  return { token, tokenHash, session, user };
+}
+
+async function requireAuth(req, res) {
+  const auth = await getAuthContext(req);
+  if (!auth) {
+    send(res, 401, { error: 'Unauthorized' });
+    return null;
+  }
+  return auth;
+}
+
+async function getQuotaStatus(user) {
+  const limit = Math.max(1, Number(user.dailyLimit || DEFAULT_DAILY_LIMIT));
+  const dateKey = getQuotaDateKey();
+  const used = Number(await kv.get(getQuotaUsedKey(user.id, dateKey)) || 0);
+  return {
+    limit,
+    used: Math.max(0, used),
+    remaining: Math.max(0, limit - used),
+    resetAt: getQuotaResetIso(),
+  };
+}
+
+async function consumeDailyQuota(user) {
+  const limit = Math.max(1, Number(user.dailyLimit || DEFAULT_DAILY_LIMIT));
+  const dateKey = getQuotaDateKey();
+  const usedKey = getQuotaUsedKey(user.id, dateKey);
+
+  const newUsed = Number(await kv.incr(usedKey));
+  if (newUsed === 1) {
+    await kv.expire(usedKey, getQuotaTtlSeconds());
+  }
+
+  if (newUsed > limit) {
+    await kv.decr(usedKey);
+    return {
+      ok: false,
+      limit,
+      used: limit,
+      remaining: 0,
+      resetAt: getQuotaResetIso(),
+    };
+  }
+
+  return {
+    ok: true,
+    limit,
+    used: newUsed,
+    remaining: Math.max(0, limit - newUsed),
+    resetAt: getQuotaResetIso(),
+  };
+}
+
 // 验证 API keys（输出完整 key 用于检查）
 if (!API_KEY || API_KEY.length < 10) {
   console.warn('[WARN] SUNO_API_KEY 未设置或格式不正确，将无法调用 Suno 接口。');
@@ -113,7 +307,6 @@ if (!DASHSCOPE_API_KEY || DASHSCOPE_API_KEY.length < 10) {
     }
   }
   console.log(`[INFO] DASHSCOPE_API_KEY 已加载: ${maskKey(DASHSCOPE_API_KEY)} (格式: ${DASHSCOPE_API_KEY.startsWith('sk-') ? '正确' : '错误'})`);
-  console.log(`[DEBUG] DASHSCOPE_API_KEY (完整): ${DASHSCOPE_API_KEY}`);
 }
 
 function send(res, status, body, headers = {}) {
@@ -138,8 +331,8 @@ function send(res, status, body, headers = {}) {
   res.writeHead(status, { 
     'content-type': 'application/json; charset=utf-8',
     'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET, POST, OPTIONS',
-    'access-control-allow-headers': 'Content-Type, Authorization',
+    'access-control-allow-methods': 'GET, POST, PATCH, DELETE, OPTIONS',
+    'access-control-allow-headers': 'Content-Type, Authorization, X-Internal-Admin-Secret',
     ...headers 
   });
   res.end(jsonBody);
@@ -448,14 +641,154 @@ async function handler(req, res) {
       console.log(`[${nowIso()}] [${requestId}] Handling OPTIONS preflight request`);
       res.writeHead(200, {
         'access-control-allow-origin': '*',
-        'access-control-allow-methods': 'GET, POST, OPTIONS',
-        'access-control-allow-headers': 'Content-Type, Authorization',
+        'access-control-allow-methods': 'GET, POST, PATCH, DELETE, OPTIONS',
+        'access-control-allow-headers': 'Content-Type, Authorization, X-Internal-Admin-Secret',
       });
       return res.end();
     }
 
+    // =========================
+    // Auth APIs
+    // =========================
+    if (req.method === 'POST' && url.pathname === '/api/auth/register') {
+      const body = await readJson(req);
+      const usernameRaw = String(body?.username || '').trim();
+      const password = String(body?.password || '');
+
+      const usernameError = validateUsername(usernameRaw);
+      if (usernameError) return send(res, 400, { error: usernameError });
+      const passwordError = validatePassword(password);
+      if (passwordError) return send(res, 400, { error: passwordError });
+
+      const usernameNormalized = normalizeUsername(usernameRaw);
+      const usernameKey = getUsernameKey(usernameNormalized);
+      const existingUserId = await kv.get(usernameKey);
+      if (existingUserId) {
+        return send(res, 409, { error: '账号已存在' });
+      }
+
+      const userId = `u_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      const user = {
+        id: userId,
+        username: usernameRaw,
+        usernameNormalized,
+        passwordHash: hashPassword(password),
+        role: 'user',
+        status: 'active',
+        dailyLimit: DEFAULT_DAILY_LIMIT,
+        createdAt: nowIso(),
+      };
+
+      // 小规模场景下做“先检查后写入”；若出现并发冲突，以最后 set 为准
+      await kv.set(getUserKey(userId), user);
+      await kv.set(usernameKey, userId);
+
+      const session = await createSessionForUser(user);
+      const quota = await getQuotaStatus(user);
+      return send(res, 200, {
+        success: true,
+        token: session.token,
+        expiresAt: session.expiresAt,
+        user: publicUser(user),
+        quota,
+      });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/auth/login') {
+      const body = await readJson(req);
+      const usernameRaw = String(body?.username || '').trim();
+      const password = String(body?.password || '');
+
+      if (!usernameRaw || !password) {
+        return send(res, 400, { error: '账号和密码不能为空' });
+      }
+
+      const usernameNormalized = normalizeUsername(usernameRaw);
+      const userId = await kv.get(getUsernameKey(usernameNormalized));
+      if (!userId) {
+        return send(res, 401, { error: '账号或密码错误' });
+      }
+
+      const user = await kv.get(getUserKey(userId));
+      if (!user || user.status === 'disabled') {
+        return send(res, 401, { error: '账号或密码错误' });
+      }
+
+      if (!verifyPassword(password, user.passwordHash)) {
+        return send(res, 401, { error: '账号或密码错误' });
+      }
+
+      const session = await createSessionForUser(user);
+      const quota = await getQuotaStatus(user);
+      return send(res, 200, {
+        success: true,
+        token: session.token,
+        expiresAt: session.expiresAt,
+        user: publicUser(user),
+        quota,
+      });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/auth/logout') {
+      const auth = await getAuthContext(req);
+      if (auth?.tokenHash) {
+        await kv.del(getTokenKey(auth.tokenHash));
+      }
+      return send(res, 200, { success: true });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/auth/me') {
+      const auth = await requireAuth(req, res);
+      if (!auth) return;
+      const quota = await getQuotaStatus(auth.user);
+      return send(res, 200, {
+        success: true,
+        user: publicUser(auth.user),
+        quota,
+      });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/quota/me') {
+      const auth = await requireAuth(req, res);
+      if (!auth) return;
+      const quota = await getQuotaStatus(auth.user);
+      return send(res, 200, { success: true, quota });
+    }
+
+    // 无管理员系统版本：通过内部密钥调整指定用户每日配额
+    if (req.method === 'PATCH' && url.pathname === '/api/internal/users/daily-limit') {
+      if (!INTERNAL_ADMIN_SECRET) {
+        return send(res, 501, { error: 'INTERNAL_ADMIN_SECRET is not configured' });
+      }
+      const secret = String(req.headers['x-internal-admin-secret'] || '');
+      if (secret !== INTERNAL_ADMIN_SECRET) {
+        return send(res, 403, { error: 'Forbidden' });
+      }
+
+      const body = await readJson(req);
+      const usernameRaw = String(body?.username || '').trim();
+      const dailyLimit = Number(body?.dailyLimit);
+      if (!usernameRaw) return send(res, 400, { error: 'username is required' });
+      if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 100000) {
+        return send(res, 400, { error: 'dailyLimit must be an integer between 1 and 100000' });
+      }
+
+      const userId = await kv.get(getUsernameKey(normalizeUsername(usernameRaw)));
+      if (!userId) return send(res, 404, { error: 'user not found' });
+      const user = await kv.get(getUserKey(userId));
+      if (!user) return send(res, 404, { error: 'user not found' });
+
+      user.dailyLimit = dailyLimit;
+      user.updatedAt = nowIso();
+      await kv.set(getUserKey(userId), user);
+      const quota = await getQuotaStatus(user);
+      return send(res, 200, { success: true, user: publicUser(user), quota });
+    }
+
     // API: submit music generation
     if (req.method === 'POST' && url.pathname === '/api/suno/submit/music') {
+      const auth = await requireAuth(req, res);
+      if (!auth) return;
       const body = await readJson(req);
 
       // 根据 BASE_URL 判断使用哪个 API 格式
@@ -531,6 +864,8 @@ async function handler(req, res) {
 
     // API: fetch task status
     if (req.method === 'GET' && url.pathname === '/api/suno/fetch') {
+      const auth = await requireAuth(req, res);
+      if (!auth) return;
       const id = url.searchParams.get('id');
       if (!id) return send(res, 400, { error: 'missing id' });
       
@@ -557,6 +892,8 @@ async function handler(req, res) {
 
     // API: 分解用户目标为学习步骤（使用通义千问LLM）
     if (req.method === 'POST' && url.pathname === '/api/decompose-prompt') {
+      const auth = await requireAuth(req, res);
+      if (!auth) return;
       console.log(`[${nowIso()}] [${requestId}] Processing decompose-prompt request`);
       
       if (!DASHSCOPE_API_KEY) {
@@ -660,6 +997,8 @@ async function handler(req, res) {
 
     // API: 生成歌词（使用通义千问LLM）
     if (req.method === 'POST' && url.pathname === '/api/generate-lyrics') {
+      const auth = await requireAuth(req, res);
+      if (!auth) return;
       if (!DASHSCOPE_API_KEY) {
         return send(res, 500, { error: 'DASHSCOPE_API_KEY not configured' });
       }
@@ -730,6 +1069,18 @@ async function handler(req, res) {
 
     // API: 生成完整歌曲歌词（包含所有4个步骤）
     if (req.method === 'POST' && url.pathname === '/api/generate-complete-song') {
+      const auth = await requireAuth(req, res);
+      if (!auth) return;
+
+      const quotaResult = await consumeDailyQuota(auth.user);
+      if (!quotaResult.ok) {
+        return send(res, 429, {
+          error: '今日生成次数已用完',
+          code: 'DAILY_LIMIT_EXCEEDED',
+          quota: quotaResult,
+        });
+      }
+
       if (!DASHSCOPE_API_KEY) {
         return send(res, 500, { error: 'DASHSCOPE_API_KEY not configured' });
       }
@@ -804,6 +1155,7 @@ async function handler(req, res) {
           fixed_prefix: fixedPrefix,
           steps_lyrics: normalizedStepsLyrics,
           full_lyrics: fullLyrics,
+          quota: quotaResult,
         });
       } catch (e) {
         console.error(`[${nowIso()}] Generate complete song error:`, e);
@@ -813,6 +1165,8 @@ async function handler(req, res) {
 
     // API: 生成组合图片（包含4个小图的大图）
     if (req.method === 'POST' && url.pathname === '/api/generate-combined-image') {
+      const auth = await requireAuth(req, res);
+      if (!auth) return;
       if (!DASHSCOPE_API_KEY) {
         return send(res, 500, { error: 'DASHSCOPE_API_KEY not configured' });
       }
@@ -899,6 +1253,8 @@ async function handler(req, res) {
 
     // API: 保存生成的内容（Vercel Blob + KV）
     if (req.method === 'POST' && url.pathname === '/api/save-content') {
+      const auth = await requireAuth(req, res);
+      if (!auth) return;
       const body = await readJson(req);
       const { stepIndex, stepName, lyrics, imageUrl, audioUrl, sessionId } = body;
 
@@ -966,13 +1322,14 @@ async function handler(req, res) {
 
         // 将“本地可读的 asset url”映射写入 KV，供导入历史时快速生成 URL
         // 只要保存过就写；重复写是幂等的
-        const kvKey = `session:${subDirName}:step:${stepIndex}`;
+        const kvKey = getStepCacheKey(auth.user.id, subDirName, stepIndex);
         await kv.hset(kvKey, {
           stepIndex: String(stepIndex),
           stepName: String(stepName || ''),
           lyricsUrl: saved.lyricsUrl || '',
           imageUrl: saved.imageUrl || '',
           audioUrl: saved.audioUrl || '',
+          userId: String(auth.user.id),
           updatedAt: new Date().toISOString(),
         });
 
@@ -989,6 +1346,8 @@ async function handler(req, res) {
 
     // API: 保存历史记录元数据（当所有步骤都生成完成时）（KV 持久化）
     if (req.method === 'POST' && url.pathname === '/api/save-history') {
+      const auth = await requireAuth(req, res);
+      if (!auth) return;
       const body = await readJson(req);
       const { sessionId, decomposedData, stepContents, userGoal, learningFocus, musicStyle, musicVoice, pictureBookStyle, characterType } = body;
 
@@ -1016,7 +1375,7 @@ async function handler(req, res) {
         // 保存历史记录元数据（同时将 URL 固化为 KV 中保存的稳定 URL，如果存在）
         const normalizedStepContents = await Promise.all(stepContents.map(async (content, index) => {
           const stepNumber = index + 1;
-          const kvKey = `session:${sessionId}:step:${stepNumber}`;
+          const kvKey = getStepCacheKey(auth.user.id, sessionId, stepNumber);
           let saved = null;
           try {
             saved = await kv.hgetall(kvKey);
@@ -1038,6 +1397,7 @@ async function handler(req, res) {
 
         const historyData = {
           sessionId,
+          userId: auth.user.id,
           userGoal,
           learningFocus,
           musicStyle,
@@ -1050,10 +1410,10 @@ async function handler(req, res) {
         };
 
         // 主记录
-        await kv.set(`history:${sessionId}`, historyData);
+        await kv.set(getHistoryDataKey(auth.user.id, sessionId), historyData);
 
         // 列表索引：用 sorted set 按时间排序，列表接口可分页
-        await kv.zadd('history:index', { score: Date.now(), member: sessionId });
+        await kv.zadd(getHistoryIndexKey(auth.user.id), { score: Date.now(), member: sessionId });
 
         return send(res, 200, {
           success: true,
@@ -1068,10 +1428,12 @@ async function handler(req, res) {
 
     // API: 获取历史记录列表（KV）
     if (req.method === 'GET' && url.pathname === '/api/history') {
+      const auth = await requireAuth(req, res);
+      if (!auth) return;
       try {
         // 默认返回最近 50 条
         const limit = Math.min(Number(url.searchParams?.get?.('limit') || 50) || 50, 200);
-        const sessionIds = await kv.zrange('history:index', -limit, -1);
+        const sessionIds = await kv.zrange(getHistoryIndexKey(auth.user.id), -limit, -1);
 
         if (!sessionIds || sessionIds.length === 0) {
           return send(res, 200, { history: [] });
@@ -1082,13 +1444,14 @@ async function handler(req, res) {
 
         const items = await Promise.all(idsDesc.map(async (sid) => {
           try {
-            const data = await kv.get(`history:${sid}`);
+            const data = await kv.get(getHistoryDataKey(auth.user.id, sid));
             if (!data) return null;
             return {
               sessionId: data.sessionId,
               userGoal: data.userGoal,
               createdAt: data.createdAt,
               stepCount: data.decomposedData?.steps?.length || 0,
+              hasAudio: !!(data.stepContents || []).some((s) => s?.audioUrl && !s?.audioDeleted),
             };
           } catch {
             return null;
@@ -1104,6 +1467,8 @@ async function handler(req, res) {
 
     // API: 加载历史记录（KV）
     if (req.method === 'GET' && url.pathname.startsWith('/api/history/')) {
+      const auth = await requireAuth(req, res);
+      if (!auth) return;
       const sessionId = url.pathname.replace('/api/history/', '');
       
       if (!sessionId) {
@@ -1111,7 +1476,7 @@ async function handler(req, res) {
       }
 
       try {
-        const historyData = await kv.get(`history:${sessionId}`);
+        const historyData = await kv.get(getHistoryDataKey(auth.user.id, sessionId));
         if (!historyData) {
           return send(res, 404, { error: 'History not found' });
         }
@@ -1123,11 +1488,84 @@ async function handler(req, res) {
       }
     }
 
+    // API: 删除历史记录中的音乐（仅删除当前用户自己的音乐引用）
+    if (req.method === 'DELETE' && url.pathname.startsWith('/api/history/')) {
+      const auth = await requireAuth(req, res);
+      if (!auth) return;
+
+      const raw = url.pathname.replace('/api/history/', '');
+      const [sessionId, action] = raw.split('/');
+      if (!sessionId || action !== 'music') {
+        return send(res, 404, { error: 'Not found' });
+      }
+
+      try {
+        const historyKey = getHistoryDataKey(auth.user.id, sessionId);
+        const historyData = await kv.get(historyKey);
+        if (!historyData) return send(res, 404, { error: 'History not found' });
+
+        const stepContents = Array.isArray(historyData.stepContents) ? historyData.stepContents : [];
+        const now = nowIso();
+        const audioUrls = [];
+
+        const nextStepContents = stepContents.map((item, idx) => {
+          const audioUrl = item?.audioUrl ? String(item.audioUrl) : '';
+          if (audioUrl) audioUrls.push(audioUrl);
+          return {
+            ...item,
+            audioUrl: null,
+            audioDeleted: true,
+            audioDeletedAt: now,
+            audioError: item?.audioError || '音乐已删除',
+          };
+        });
+
+        historyData.stepContents = nextStepContents;
+        historyData.updatedAt = now;
+        await kv.set(historyKey, historyData);
+
+        // 同步更新每步缓存映射，便于后续历史导入和回放保持一致
+        await Promise.all(nextStepContents.map(async (item, index) => {
+          const stepNumber = index + 1;
+          const stepCacheKey = getStepCacheKey(auth.user.id, sessionId, stepNumber);
+          await kv.hset(stepCacheKey, {
+            audioUrl: '',
+            updatedAt: now,
+          });
+        }));
+
+        // 尝试删除 Vercel Blob 资源（可选，失败不影响业务结果）
+        const uniqueUrls = [...new Set(audioUrls)];
+        await Promise.all(uniqueUrls.map(async (audioUrl) => {
+          try {
+            // 仅尝试删除 blob.vercel-storage URL；外部 URL（如 suno）无法删除
+            if (audioUrl.includes('.blob.vercel-storage.com')) {
+              await del(audioUrl);
+            }
+          } catch (e) {
+            console.warn(`[${nowIso()}] delete blob audio failed (${audioUrl}):`, e?.message || e);
+          }
+        }));
+
+        return send(res, 200, {
+          success: true,
+          sessionId,
+          deletedAudioCount: uniqueUrls.length,
+          message: '音乐已删除',
+        });
+      } catch (e) {
+        console.error(`[${nowIso()}] Delete music error:`, e);
+        return send(res, 500, { error: String(e.message || e) });
+      }
+    }
+
     // NOTE: /api/asset 本地文件读取接口已弃用。
     // 资源现在通过 Vercel Blob 提供稳定公开 URL；历史导入也直接使用历史数据中的 URL。
 
     // API: 图片生成 (DashScope qwen-image)
     if (req.method === 'POST' && url.pathname === '/api/generate-image') {
+      const auth = await requireAuth(req, res);
+      if (!auth) return;
       if (!DASHSCOPE_API_KEY) {
         return send(res, 500, { error: 'DASHSCOPE_API_KEY not configured' });
       }

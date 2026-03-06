@@ -1038,6 +1038,26 @@
       </div>
       </div>
 
+      <div class="section" id="authGuestSection">
+        <h2 style="font-size: 16px; margin-top: 0;">🔐 账号登录</h2>
+        <label>账号</label>
+        <input id="authUsername" placeholder="请输入账号" />
+        <label>密码</label>
+        <input id="authPassword" type="password" placeholder="请输入密码（至少8位）" />
+        <div style="display: flex; gap: 8px;">
+          <button id="btnLogin" style="margin: 0; flex: 1;">登录</button>
+          <button id="btnRegister" style="margin: 0; flex: 1; background: #52c41a;">注册</button>
+        </div>
+        <div id="authStatus" class="muted" style="margin-top: 8px; font-size: 12px;"></div>
+      </div>
+
+      <div class="section" id="authUserSection" style="display: none;">
+        <h2 style="font-size: 16px; margin-top: 0;">👤 当前账号</h2>
+        <div id="currentUsername" style="font-weight: 700; margin-bottom: 8px;">-</div>
+        <div id="quotaInfo" class="muted" style="margin-bottom: 8px;">今日剩余：-</div>
+        <button id="btnLogout" style="background: #8c8c8c;">退出登录</button>
+      </div>
+
       <div class="section">
         <h2 style="font-size: 16px; margin-top: 0;">📝 设置学习目标</h2>
         <div class="muted" style="margin-top: 6px;">适合3-6岁儿童 · 色彩温柔 · 操作简单</div>
@@ -1114,6 +1134,7 @@
           </div>
           
           <button id="btnRegenerate" class="btn-regenerate" disabled>🔄 重新生成</button>
+          <button id="btnDeleteMusic" style="background: #b00020;" disabled>🗑 删除本次音乐</button>
           <button id="btnGenerateAll" style="display: none; background: #722ed1; margin-top: 8px;">⚡ 一次性生成所有内容</button>
           
           <div id="generateStatus" class="muted" style="margin-top: 8px; font-size: 12px;"></div>
@@ -1204,6 +1225,8 @@
   let historyData = []; // 历史记录数据
   let historyCurrentPage = 1; // 当前历史记录页码
   const historyPageSize = 5; // 每页显示的历史记录数量
+  let authToken = localStorage.getItem('auth_token') || '';
+  let currentUser = null;
 
   // 全局音频播放器（单例）：确保切换步骤时音乐绝对不中断
   let globalAudio = null;
@@ -1211,6 +1234,192 @@
   let globalAudioBindingsReady = false;
   let globalAudioIsSeeking = false;
   let globalAudioPendingAutoplay = false;
+
+  const rawFetch = window.fetch.bind(window);
+  window.fetch = async function(input, init = {}) {
+    const reqUrl = typeof input === 'string' ? input : (input && input.url) || '';
+    const finalInit = { ...init };
+
+    if (typeof reqUrl === 'string' && reqUrl.startsWith('/api/')) {
+      const headers = new Headers(finalInit.headers || {});
+      if (authToken && !headers.has('Authorization')) {
+        headers.set('Authorization', `Bearer ${authToken}`);
+      }
+      finalInit.headers = headers;
+    }
+
+    const resp = await rawFetch(input, finalInit);
+    if (
+      typeof reqUrl === 'string' &&
+      reqUrl.startsWith('/api/') &&
+      !reqUrl.startsWith('/api/auth/') &&
+      resp.status === 401
+    ) {
+      applyLoggedOutState('登录已过期，请重新登录');
+    }
+    return resp;
+  };
+
+  function setAuthStatus(text, type = 'muted') {
+    const el = $('authStatus');
+    if (!el) return;
+    el.className = type;
+    el.textContent = text || '';
+  }
+
+  function setAppEnabled(enabled) {
+    const ids = [
+      'userGoal', 'learningFocus', 'musicStyle', 'musicStyleCustom',
+      'musicVoice', 'musicVoiceCustom', 'pictureBookStyle', 'pictureBookStyleCustom',
+      'characterType', 'characterTypeCustom', 'characterName',
+      'btnDecompose', 'btnRegenerate', 'btnGenerateAll', 'btnHistory',
+      'btnDeleteMusic'
+    ];
+    ids.forEach((id) => {
+      const el = $(id);
+      if (!el) return;
+      if (enabled) {
+        if (id === 'btnRegenerate') {
+          el.disabled = !stepContents[currentStepIndex];
+        } else if (id === 'btnDeleteMusic') {
+          el.disabled = true;
+        } else {
+          el.disabled = false;
+        }
+      } else {
+        el.disabled = true;
+      }
+    });
+  }
+
+  async function refreshQuota() {
+    if (!authToken || !currentUser) return;
+    try {
+      const resp = await fetch('/api/quota/me');
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) return;
+      const q = data?.quota || {};
+      const text = `今日剩余：${q.remaining ?? '-'} / ${q.limit ?? '-'}（重置：${q.resetAt ? new Date(q.resetAt).toLocaleString('zh-CN') : '-'}）`;
+      $('quotaInfo').textContent = text;
+    } catch (e) {
+      console.warn('refresh quota failed:', e);
+    }
+  }
+
+  function applyLoggedInState(user, token, quota) {
+    currentUser = user || null;
+    authToken = token || authToken;
+    if (authToken) localStorage.setItem('auth_token', authToken);
+    $('authGuestSection').style.display = 'none';
+    $('authUserSection').style.display = 'block';
+    $('currentUsername').textContent = currentUser?.username || '-';
+    setAuthStatus('');
+    setAppEnabled(true);
+
+    if (quota) {
+      $('quotaInfo').textContent = `今日剩余：${quota.remaining ?? '-'} / ${quota.limit ?? '-'}（重置：${quota.resetAt ? new Date(quota.resetAt).toLocaleString('zh-CN') : '-'}）`;
+    } else {
+      refreshQuota();
+    }
+    updateNavigationButtons();
+  }
+
+  function applyLoggedOutState(message = '') {
+    currentUser = null;
+    authToken = '';
+    localStorage.removeItem('auth_token');
+    $('authGuestSection').style.display = 'block';
+    $('authUserSection').style.display = 'none';
+    $('quotaInfo').textContent = '今日剩余：-';
+    decomposedData = null;
+    stepContents = [];
+    currentStepIndex = 0;
+    currentSessionId = null;
+    $('stepsSection').style.display = 'none';
+    $('stepsContainer').style.display = 'none';
+    $('stepsContainer').innerHTML = '';
+    $('welcomeMessage').style.display = 'block';
+    $('stepIndicator').innerHTML = '';
+    $('characterInfo').style.display = 'none';
+    clearGlobalAudioSource();
+    setAppEnabled(false);
+    if (message) setAuthStatus(message, 'err');
+  }
+
+  async function restoreLogin() {
+    if (!authToken) {
+      applyLoggedOutState();
+      return;
+    }
+    try {
+      const resp = await fetch('/api/auth/me');
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data?.user) {
+        applyLoggedOutState('请先登录');
+        return;
+      }
+      applyLoggedInState(data.user, authToken, data.quota);
+    } catch (e) {
+      applyLoggedOutState('无法连接服务器，请稍后重试');
+    }
+  }
+
+  async function registerAccount() {
+    const username = $('authUsername').value.trim();
+    const password = $('authPassword').value;
+    if (!username || !password) {
+      setAuthStatus('请输入账号和密码', 'err');
+      return;
+    }
+    setAuthStatus('注册中...');
+    try {
+      const resp = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || '注册失败');
+      applyLoggedInState(data.user, data.token, data.quota);
+      $('authPassword').value = '';
+      setAuthStatus('注册并登录成功', 'ok');
+    } catch (e) {
+      setAuthStatus(`注册失败：${e?.message || e}`, 'err');
+    }
+  }
+
+  async function loginAccount() {
+    const username = $('authUsername').value.trim();
+    const password = $('authPassword').value;
+    if (!username || !password) {
+      setAuthStatus('请输入账号和密码', 'err');
+      return;
+    }
+    setAuthStatus('登录中...');
+    try {
+      const resp = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || '登录失败');
+      applyLoggedInState(data.user, data.token, data.quota);
+      $('authPassword').value = '';
+      setAuthStatus('登录成功', 'ok');
+    } catch (e) {
+      setAuthStatus(`登录失败：${e?.message || e}`, 'err');
+    }
+  }
+
+  async function logoutAccount() {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch (e) {
+      // ignore network errors on logout
+    }
+    applyLoggedOutState('已退出登录');
+  }
 
   // 处理自定义输入显示/隐藏
   function setupCustomInputs() {
@@ -1460,8 +1669,23 @@
     }
   }
 
+  function clearGlobalAudioSource() {
+    if (!globalAudio) return;
+    try { globalAudio.pause(); } catch (_) {}
+    globalAudioSrc = '';
+    try {
+      globalAudio.removeAttribute('src');
+      globalAudio.load();
+    } catch (_) {}
+    updateGlobalAudioUI();
+  }
+
   // 分解用户目标
   async function decomposeGoal() {
+    if (!currentUser) {
+      setAuthStatus('请先登录再开始生成', 'err');
+      return;
+    }
     const userGoal = $('userGoal').value.trim();
     const learningFocus = $('learningFocus').value.trim();
     const musicStyle = getActualValue('musicStyle', 'musicStyleCustom');
@@ -1847,7 +2071,9 @@
     // 显示音乐：步骤区不再承载播放器（播放器在右侧顶部全局区域），
     // 这里仅显示“音乐已生成/失败”等状态，避免切步骤引发任何音频行为。
     if (audioEl) {
-      if (content.audioUrl) {
+      if (content.audioDeleted) {
+        audioEl.innerHTML = `<div style="text-align: center; padding: 10px 0; color: #b00020;">音乐已删除</div>`;
+      } else if (content.audioUrl) {
         audioEl.innerHTML = `<div style="text-align: center; padding: 10px 0; color: #667085;">音乐已生成，可在上方全局播放器播放</div>`;
       } else if (content.audioError) {
         audioEl.innerHTML = `<div style="text-align: center; padding: 20px; color: #b00020; display: flex; align-items: center; justify-content: center; height: 100%;">音乐生成失败：${content.audioError}</div>`;
@@ -1929,10 +2155,19 @@
 
   // 更新导航按钮状态
   function updateNavigationButtons() {
+    if (!decomposedData || !decomposedData.steps || !decomposedData.steps.length) {
+      $('btnPrev').disabled = true;
+      $('btnNext').disabled = true;
+      $('btnRegenerate').disabled = true;
+      $('btnDeleteMusic').disabled = true;
+      return;
+    }
     const totalSteps = decomposedData.steps.length;
-    $('btnPrev').disabled = currentStepIndex === 0;
-    $('btnNext').disabled = currentStepIndex >= totalSteps - 1;
-    $('btnRegenerate').disabled = !stepContents[currentStepIndex];
+    $('btnPrev').disabled = !currentUser || currentStepIndex === 0;
+    $('btnNext').disabled = !currentUser || currentStepIndex >= totalSteps - 1;
+    $('btnRegenerate').disabled = !currentUser || !stepContents[currentStepIndex];
+    const hasAudio = !!stepContents.find((item) => item && item.audioUrl && !item.audioDeleted);
+    $('btnDeleteMusic').disabled = !currentUser || !currentSessionId || !hasAudio;
   }
 
   // 上一步
@@ -1956,6 +2191,10 @@
 
   // 重新生成所有内容（因为所有步骤共享同一首歌曲和组合图）
   async function regenerateCurrentStep() {
+    if (!currentUser) {
+      setAuthStatus('请先登录', 'err');
+      return;
+    }
     if (isGeneratingAll) {
       alert('正在生成所有内容，请稍候...');
       return;
@@ -1993,6 +2232,10 @@
 
   // 一次性生成所有步骤的内容（新逻辑：生成一首完整歌曲和一张组合大图）
   async function generateAllSteps() {
+    if (!currentUser) {
+      setAuthStatus('请先登录', 'err');
+      return;
+    }
     if (!decomposedData || !decomposedData.steps || decomposedData.steps.length === 0) {
       alert('请先分解学习目标');
       return;
@@ -2062,7 +2305,15 @@
 
       const lyricsData = await lyricsResp.json().catch(() => ({}));
       if (!lyricsResp.ok) {
+        if (lyricsData?.code === 'DAILY_LIMIT_EXCEEDED') {
+          await refreshQuota();
+        }
         throw new Error(lyricsData?.error || '完整歌曲歌词生成失败');
+      }
+
+      if (lyricsData?.quota) {
+        const q = lyricsData.quota;
+        $('quotaInfo').textContent = `今日剩余：${q.remaining ?? '-'} / ${q.limit ?? '-'}（重置：${q.resetAt ? new Date(q.resetAt).toLocaleString('zh-CN') : '-'}）`;
       }
 
       const stepsLyrics = Array.isArray(lyricsData.steps_lyrics) ? lyricsData.steps_lyrics : null;
@@ -2143,6 +2394,7 @@
           lyrics: stepsLyrics[i], // 每步只显示自己那一行歌词
           imageUrl: croppedImages[i], // 每个步骤使用自己的小图
           audioUrl: audioUrl, // 所有步骤共享完整音乐
+          audioDeleted: false,
           imageError: null,
           audioError: audioError,
         };
@@ -2172,12 +2424,14 @@
       } catch (e) {
         console.error('保存历史记录失败:', e);
       }
+      await refreshQuota();
     } catch (e) {
       statusEl.className = 'err';
       statusEl.textContent = `❌ 生成过程中出错：${e?.message || e}`;
     } finally {
       isGeneratingAll = false;
       updateNavigationButtons();
+      await refreshQuota();
     }
   }
 
@@ -2400,6 +2654,7 @@
       lyrics: lyrics,
       imageUrl: imageResult.status === 'fulfilled' ? imageResult.value : null,
       audioUrl: musicResult.status === 'fulfilled' ? musicResult.value : null,
+      audioDeleted: false,
       imageError: imageResult.status === 'rejected' ? (imageResult.reason?.message || imageResult.reason) : null,
       audioError: musicResult.status === 'rejected' ? (musicResult.reason?.message || musicResult.reason) : null,
     };
@@ -2654,7 +2909,7 @@
     const clickX = event.clientX - rect.left;
     const percent = (clickX / rect.width) * 100;
     globalAudio.currentTime = (percent / 100) * globalAudio.duration;
-    updateCurrentAudioUI();
+    updateGlobalAudioUI();
   }
 
   // 保存生成的内容
@@ -3027,8 +3282,69 @@
     }
   }
 
+  async function deleteMusicBySession(sessionId, silent = false) {
+    if (!sessionId) throw new Error('缺少会话ID');
+    const resp = await fetch(`/api/history/${encodeURIComponent(sessionId)}/music`, {
+      method: 'DELETE',
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      throw new Error(data?.error || `HTTP ${resp.status}`);
+    }
+
+    if (currentSessionId === sessionId && Array.isArray(stepContents)) {
+      stepContents = stepContents.map((item) => ({
+        ...(item || {}),
+        audioUrl: null,
+        audioDeleted: true,
+        audioDeletedAt: new Date().toISOString(),
+        audioError: '音乐已删除',
+      }));
+      clearGlobalAudioSource();
+      if (decomposedData && decomposedData.steps && decomposedData.steps.length > 0) {
+        showCurrentStep();
+      }
+      updateNavigationButtons();
+    }
+
+    await refreshQuota();
+    if (!silent) {
+      alert('✅ 音乐已删除');
+    }
+    return data;
+  }
+
+  async function deleteCurrentSessionMusic() {
+    if (!currentSessionId) {
+      alert('当前没有可删除的历史记录');
+      return;
+    }
+    if (!confirm('确认删除本次生成的音乐吗？删除后不可恢复。')) return;
+    try {
+      await deleteMusicBySession(currentSessionId);
+    } catch (e) {
+      alert('删除失败：' + (e?.message || e));
+    }
+  }
+
+  async function deleteHistoryMusic(sessionId) {
+    if (!sessionId) return;
+    if (!confirm('确认删除该历史记录关联的音乐吗？删除后不可恢复。')) return;
+    try {
+      await deleteMusicBySession(sessionId, true);
+      await loadHistoryList();
+      alert('✅ 音乐已删除');
+    } catch (e) {
+      alert('删除失败：' + (e?.message || e));
+    }
+  }
+
   // 显示历史记录模态框
   async function showHistoryModal() {
+    if (!currentUser) {
+      setAuthStatus('请先登录后查看历史记录', 'err');
+      return;
+    }
     const modal = $('historyModal');
     if (modal) {
       modal.classList.add('active');
@@ -3099,6 +3415,7 @@
 
     historyListEl.innerHTML = currentPageData.map(item => {
       const date = new Date(item.createdAt);
+      const canDeleteAudio = item.hasAudio !== false;
       const dateStr = date.toLocaleString('zh-CN', {
         year: 'numeric',
         month: '2-digit',
@@ -3116,9 +3433,14 @@
                 <div>${dateStr}</div>
                 <div>共 ${item.stepCount} 个步骤</div>
               </div>
-              <button class="history-item-btn" onclick="importHistory('${item.sessionId}')">
-                📥 导入
-              </button>
+              <div style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end;">
+                <button class="history-item-btn" onclick="importHistory('${item.sessionId}')">
+                  📥 导入
+                </button>
+                <button class="history-item-btn" style="background: #b00020;" onclick="deleteHistoryMusic('${item.sessionId}')" ${canDeleteAudio ? '' : 'disabled'}>
+                  🗑 删音乐
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -3188,6 +3510,7 @@
           lyrics: stepsLyrics[index] || '',
           imageUrl: item.imageUrl,
           audioUrl: item.audioUrl,
+          audioDeleted: !!item.audioDeleted,
           lyricsUrl: item.lyricsUrl,
           lyricsError: item.lyricsError || null,
           imageError: item.imageError || null,
@@ -3216,6 +3539,7 @@
             lyrics: lyricsContent,
             imageUrl: item.imageUrl, // 直接使用历史记录中的稳定 URL
             audioUrl: item.audioUrl, // 直接使用历史记录中的稳定 URL
+            audioDeleted: !!item.audioDeleted,
             lyricsUrl: item.lyricsUrl,
             lyricsError: lyricsErr,
             imageError: item.imageError || null,
@@ -3254,6 +3578,8 @@
           ensureGlobalAudioSource(importedAudioUrl);
           initGlobalAudioIfNeeded();
           updateGlobalAudioUI();
+        } else {
+          clearGlobalAudioSource();
         }
       } catch (e) {
         console.warn('导入历史记录后设置全局音频失败:', e);
@@ -3302,7 +3628,6 @@
   window.togglePlayPause = togglePlayPause;
   window.restartAudio = restartAudio;
   window.seekAudio = seekAudio;
-  window.seekAudio = seekAudio;
   window.saveStepContent = saveStepContent;
   window.downloadLyrics = downloadLyrics;
   window.downloadImage = downloadImage;
@@ -3313,18 +3638,24 @@
   window.importHistory = importHistory;
   window.historyPrevPage = historyPrevPage;
   window.historyNextPage = historyNextPage;
-  window.historyPrevPage = historyPrevPage;
-  window.historyNextPage = historyNextPage;
+  window.deleteHistoryMusic = deleteHistoryMusic;
+  window.deleteCurrentSessionMusic = deleteCurrentSessionMusic;
 
   // 初始化自定义输入处理
   setupCustomInputs();
+  setAppEnabled(false);
 
   // 事件监听
+  $('btnLogin').addEventListener('click', loginAccount);
+  $('btnRegister').addEventListener('click', registerAccount);
+  $('btnLogout').addEventListener('click', logoutAccount);
+  $('btnDeleteMusic').addEventListener('click', deleteCurrentSessionMusic);
   $('btnDecompose').addEventListener('click', decomposeGoal);
   $('btnPrev').addEventListener('click', goToPrevStep);
   $('btnNext').addEventListener('click', goToNextStep);
   $('btnRegenerate').addEventListener('click', regenerateCurrentStep);
   $('btnGenerateAll').addEventListener('click', generateAllSteps);
+  restoreLogin();
 </script>
 </body>
 </html>
