@@ -57,7 +57,7 @@ const INTERNAL_ADMIN_SECRET = String(process.env.INTERNAL_ADMIN_SECRET || '').tr
 const TIANPUYUE_BASE_URL = 'https://api.tianpuyue.cn';
 const TIANPUYUE_API_KEY = String(process.env.TIANPUYUE_API_KEY || '').trim();
 const TIANPUYUE_MODEL = 'TemPolor v4.0';
-const TIANPUYUE_VOICE_ID = 'SV000013';
+const TIANPUYUE_VOICE_ID = 'SV000002';
 const TIANPUYUE_CALLBACK_URL = String(process.env.TIANPUYUE_CALLBACK_URL || 'https://example.com/callback').trim();
 
 // ============================================
