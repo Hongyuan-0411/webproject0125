@@ -197,17 +197,16 @@
       box-shadow: var(--shadow-soft);
     }
     
-    /* 全局播放器样式 */
+    /* 步骤内播放器样式（复用同一全局音频实例） */
     .global-audio-area {
       background: #fff;
       border: 1px solid var(--stroke);
       border-radius: var(--radius);
       padding: 12px 16px;
-      margin-bottom: 14px;
+      margin: 12px auto 0 auto;
       box-shadow: var(--shadow-soft);
-      position: sticky;
-      top: 14px; /* 固定在右侧面板顶部 */
-      z-index: 10;
+      width: 100%;
+      max-width: 832px;
     }
 
     .global-audio-title {
@@ -1170,21 +1169,6 @@
 
     <!-- 右侧面板 - 80% -->
     <div class="right-panel">
-      <div id="globalAudioArea" class="global-audio-area" style="display: block;">
-        <div class="global-audio-title">🎵 正在播放</div>
-        <div id="globalAudioControls" class="global-audio-controls">
-          <button id="globalPlayBtn" class="audio-control-btn play-btn" onclick="toggleGlobalPlayPause()">▶</button>
-          <button id="globalRestartBtn" class="audio-control-btn restart" onclick="restartGlobalAudio()">⏮</button>
-          <div class="audio-progress-container">
-            <div class="audio-progress-bar" id="globalProgressBar">
-              <div class="audio-progress-fill" id="globalProgressFill" style="width: 0%;">
-                <div class="audio-progress-thumb" id="globalProgressThumb"></div>
-              </div>
-            </div>
-            <div class="audio-time" id="globalAudioTime">0:00 / 0:00</div>
-          </div>
-        </div>
-      </div>
       <div id="welcomeMessage" style="text-align: center; padding: 100px 20px; color: #999;">
         <div style="display: flex; align-items: center; justify-content: center; gap: 16px; margin-bottom: 20px;">
           <img src="yinhuixing.png" alt="音绘星" style="width: 80px; height: 80px; object-fit: contain;" />
@@ -1478,12 +1462,19 @@
   }
 
   function getGlobalAudioUIRefs() {
+    const idx = Number.isInteger(currentStepIndex) ? currentStepIndex : 0;
+    const area = $(`stepGlobalAudioArea${idx}`);
+    const playBtn = $(`stepGlobalPlayBtn${idx}`);
+    const progressFill = $(`stepGlobalProgressFill${idx}`);
+    const audioTime = $(`stepGlobalAudioTime${idx}`);
+    const progressBar = $(`stepGlobalProgressBar${idx}`);
+
     return {
-      area: $('globalAudioArea'),
-      playBtn: $('globalPlayBtn'),
-      progressFill: $('globalProgressFill'),
-      audioTime: $('globalAudioTime'),
-      progressBar: $('globalProgressBar'),
+      area,
+      playBtn,
+      progressFill,
+      audioTime,
+      progressBar,
     };
   }
 
@@ -1492,9 +1483,7 @@
     const { area, playBtn, progressFill, audioTime } = getGlobalAudioUIRefs();
 
     if (area) {
-      // 有音频源时才显示全局播放器
-      // 始终显示全局播放器区域（即使还没生成音频），避免用户找不到入口
-      area.style.display = 'block';
+      area.style.display = globalAudioSrc ? 'block' : 'none';
     }
 
     if (playBtn) {
@@ -1861,6 +1850,22 @@
             <div id="stepImage${index}" class="image-box" style="text-align: center; color: #999;">
               等待生成...
             </div>
+
+            <div id="stepGlobalAudioArea${index}" class="global-audio-area" style="display: none;">
+              <div class="global-audio-title">🎵 音乐播放</div>
+              <div class="global-audio-controls">
+                <button id="stepGlobalPlayBtn${index}" class="audio-control-btn play-btn" onclick="toggleGlobalPlayPause()">▶</button>
+                <button id="stepGlobalRestartBtn${index}" class="audio-control-btn restart" onclick="restartGlobalAudio()">⏮</button>
+                <div class="audio-progress-container">
+                  <div class="audio-progress-bar" id="stepGlobalProgressBar${index}">
+                    <div class="audio-progress-fill" id="stepGlobalProgressFill${index}" style="width: 0%;">
+                      <div class="audio-progress-thumb"></div>
+                    </div>
+                  </div>
+                  <div class="audio-time" id="stepGlobalAudioTime${index}">0:00 / 0:00</div>
+                </div>
+              </div>
+            </div>
             
             <div id="stepLyrics${index}" class="lyrics-box" style="display: none;">等待生成...</div>
           </div>
@@ -1951,6 +1956,8 @@
         }
       }
     }
+    bindGlobalProgressBarIfNeeded();
+    updateGlobalAudioUI();
   }
 
   // 清理歌词内容，移除Suno格式标记
@@ -2010,6 +2017,7 @@
     const lyricsEl = $(`stepLyrics${stepIndex}`);
     const imageEl = $(`stepImage${stepIndex}`);
     const audioEl = $(`stepAudio${stepIndex}`);
+    const stepGlobalAudioAreaEl = $(`stepGlobalAudioArea${stepIndex}`);
     
     // 检查内容是否完全生成
     const isFullyGenerated = isContentFullyGenerated(content);
@@ -2027,6 +2035,9 @@
       // 音乐区域在生成时不显示任何内容（保持空白）
       if (audioEl) {
         audioEl.innerHTML = '';
+      }
+      if (stepGlobalAudioAreaEl) {
+        stepGlobalAudioAreaEl.style.display = 'none';
       }
       return;
     }
@@ -2069,21 +2080,34 @@
     }
 
     // 显示音乐：步骤区不再承载播放器（播放器在右侧顶部全局区域），
-    // 这里仅显示“音乐已生成/失败”等状态，避免切步骤引发任何音频行为。
+    // 每个步骤都显示同一个全局音频实例的控制条。
     if (audioEl) {
       if (content.audioDeleted) {
         audioEl.innerHTML = `<div style="text-align: center; padding: 10px 0; color: #b00020;">音乐已删除</div>`;
       } else if (content.audioUrl) {
-        audioEl.innerHTML = `<div style="text-align: center; padding: 10px 0; color: #667085;">音乐已生成，可在上方全局播放器播放</div>`;
+        audioEl.innerHTML = `<div style="text-align: center; padding: 10px 0; color: #667085;">音乐已生成，可在此处播放</div>`;
       } else if (content.audioError) {
         audioEl.innerHTML = `<div style="text-align: center; padding: 20px; color: #b00020; display: flex; align-items: center; justify-content: center; height: 100%;">音乐生成失败：${content.audioError}</div>`;
       } else {
         audioEl.innerHTML = '';
       }
     }
+
+    if (stepGlobalAudioAreaEl) {
+      if (!content.audioDeleted && !!content.audioUrl) {
+        stepGlobalAudioAreaEl.style.display = 'block';
+      } else {
+        stepGlobalAudioAreaEl.style.display = 'none';
+      }
+    }
     
     // 统一控制下载按钮容器的显示和按钮状态（与音乐播放键在同一行）
     updateDownloadButtons(stepIndex, content);
+
+    if (stepIndex === currentStepIndex) {
+      bindGlobalProgressBarIfNeeded();
+      updateGlobalAudioUI();
+    }
   }
 
   // 更新下载按钮的显示和状态（独立的函数，可以在多个地方调用）
