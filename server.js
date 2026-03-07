@@ -295,7 +295,7 @@ async function sendAliyunSmsVerifyCode(phoneNumber) {
 
 async function checkAliyunSmsVerifyCode(phoneNumber, verifyCode, outId) {
   const request = new Dypnsapi20170525.CheckSmsVerifyCodeRequest({
-    countryCode: 'cn',
+    countryCode: ALIYUN_SMS_COUNTRY_CODE,
     phoneNumber,
     verifyCode: String(verifyCode || '').trim(),
     outId: String(outId || '').trim(),
