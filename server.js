@@ -67,7 +67,8 @@ const ALIYUN_ACCESS_KEY_SECRET = String(process.env.ALIYUN_ACCESS_KEY_SECRET || 
 const ALIYUN_DYPN_ENDPOINT = String(process.env.ALIYUN_DYPN_ENDPOINT || 'dypnsapi.aliyuncs.com').trim();
 const ALIYUN_SMS_SIGN_NAME = String(process.env.ALIYUN_SMS_SIGN_NAME || '').trim();
 const ALIYUN_SMS_TEMPLATE_CODE = String(process.env.ALIYUN_SMS_TEMPLATE_CODE || '').trim();
-const ALIYUN_SMS_COUNTRY_CODE = String(process.env.ALIYUN_SMS_COUNTRY_CODE || '86').trim();
+const ALIYUN_SMS_COUNTRY_CODE = String(process.env.ALIYUN_SMS_COUNTRY_CODE || '86').trim().replace(/^\+/, '') || '86';
+const ALIYUN_SMS_SCHEME_NAME = String(process.env.ALIYUN_SMS_SCHEME_NAME || '').trim();
 const ALIYUN_SMS_CODE_LENGTH = Math.max(4, Math.min(8, Number(process.env.ALIYUN_SMS_CODE_LENGTH || 6)));
 const ALIYUN_SMS_VALID_TIME = Math.max(60, Number(process.env.ALIYUN_SMS_VALID_TIME || 300));
 const ALIYUN_SMS_INTERVAL = Math.max(30, Number(process.env.ALIYUN_SMS_INTERVAL || 60));
@@ -289,18 +290,24 @@ async function sendAliyunSmsVerifyCode(phoneNumber) {
     message: body.message,
     success: !!body.success,
     model: body.model || {},
+    requestId: body.requestId || '',
     outId,
   };
 }
 
-async function checkAliyunSmsVerifyCode(phoneNumber, verifyCode, outId) {
-  const request = new Dypnsapi20170525.CheckSmsVerifyCodeRequest({
-    countryCode: ALIYUN_SMS_COUNTRY_CODE,
+async function checkAliyunSmsVerifyCode(phoneNumber, verifyCode, options = {}) {
+  const countryCode = String(options?.countryCode || ALIYUN_SMS_COUNTRY_CODE || '86').trim().replace(/^\+/, '') || '86';
+  const outId = String(options?.outId || '').trim();
+  const requestPayload = {
+    countryCode,
     phoneNumber,
     verifyCode: String(verifyCode || '').trim(),
-    outId: String(outId || '').trim(),
-    caseAuthPolicy: 0,
-  });
+    caseAuthPolicy: 1,
+  };
+  if (outId) requestPayload.outId = outId;
+  if (ALIYUN_SMS_SCHEME_NAME) requestPayload.schemeName = ALIYUN_SMS_SCHEME_NAME;
+
+  const request = new Dypnsapi20170525.CheckSmsVerifyCodeRequest(requestPayload);
   const runtime = new Util.RuntimeOptions({});
   const client = getDypnsClient();
   const resp = await client.checkSmsVerifyCodeWithOptions(request, runtime);
@@ -314,6 +321,7 @@ async function checkAliyunSmsVerifyCode(phoneNumber, verifyCode, outId) {
     verifyPassed,
     verifyResult,
     model: body.model || {},
+    requestId: body.requestId || '',
   };
 }
 
@@ -825,7 +833,15 @@ async function handler(req, res) {
           return send(res, 502, { success: false, error: '发送验证码失败：缺少 outId' });
         }
 
-        await kv.set(getPhoneOutIdKey(phoneNumber), outId, {
+        const smsMeta = {
+          outId,
+          bizId: String(sent?.model?.bizId || ''),
+          requestId: String(sent?.model?.requestId || sent?.requestId || ''),
+          countryCode: ALIYUN_SMS_COUNTRY_CODE,
+          createdAt: nowIso(),
+        };
+
+        await kv.set(getPhoneOutIdKey(phoneNumber), smsMeta, {
           ex: Math.max(60, ALIYUN_SMS_VALID_TIME),
         });
 
@@ -862,20 +878,48 @@ async function handler(req, res) {
         return send(res, 409, { error: '手机号已注册' });
       }
 
-      const cachedOutId = String(await kv.get(getPhoneOutIdKey(phoneNumber)) || '');
-      const outId = outIdFromBody || cachedOutId;
-      if (!outId) {
-        return send(res, 400, { error: '验证码已过期，请重新发送' });
-      }
+      const cachedSmsMetaRaw = await kv.get(getPhoneOutIdKey(phoneNumber));
+      const cachedSmsMeta = (cachedSmsMetaRaw && typeof cachedSmsMetaRaw === 'object') ? cachedSmsMetaRaw : null;
+      const cachedOutId = cachedSmsMeta ? String(cachedSmsMeta.outId || '').trim() : String(cachedSmsMetaRaw || '').trim();
 
       try {
-        const checked = await checkAliyunSmsVerifyCode(phoneNumber, verifyCode, outId);
-        if (!checked.success || String(checked.code || '').toUpperCase() !== 'OK' || !checked.verifyPassed) {
+        const outIdCandidates = [...new Set([outIdFromBody, cachedOutId, ''].map((v) => String(v || '').trim()))];
+        const countryCodeCandidates = [...new Set([ALIYUN_SMS_COUNTRY_CODE, '86'].map((v) => String(v || '').trim().replace(/^\+/, '')).filter(Boolean))];
+
+        let verified = false;
+        let lastChecked = null;
+        let lastErrorMessage = '';
+
+        for (const countryCodeCandidate of countryCodeCandidates) {
+          for (const outIdCandidate of outIdCandidates) {
+            try {
+              const checked = await checkAliyunSmsVerifyCode(phoneNumber, verifyCode, {
+                outId: outIdCandidate,
+                countryCode: countryCodeCandidate,
+              });
+              lastChecked = checked;
+              const codeOk = String(checked.code || '').toUpperCase() === 'OK';
+              if (checked.success && codeOk && checked.verifyPassed) {
+                verified = true;
+                break;
+              }
+            } catch (checkErr) {
+              lastErrorMessage = String(checkErr?.message || checkErr);
+            }
+          }
+          if (verified) break;
+        }
+
+        if (!verified) {
+          const failCode = String(lastChecked?.code || '').toUpperCase();
+          const failMsg = lastChecked?.message || lastErrorMessage || '验证码错误或已失效';
+          console.warn(`[${nowIso()}] SMS verify failed phone=${phoneNumber}, code=${failCode}, msg=${failMsg}, reqId=${lastChecked?.requestId || ''}`);
           return send(res, 400, {
             success: false,
-            error: checked.message || '验证码错误或已失效',
-            code: checked.code || 'ALIYUN_SMS_VERIFY_FAILED',
-            verifyResult: checked.verifyResult || '',
+            error: failMsg,
+            code: failCode || 'ALIYUN_SMS_VERIFY_FAILED',
+            verifyResult: String(lastChecked?.verifyResult || ''),
+            requestId: String(lastChecked?.requestId || ''),
           });
         }
       } catch (e) {
