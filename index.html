@@ -1868,7 +1868,7 @@
 
     if (!submitResp.ok) throw new Error(`submit failed: ${submitResp.status}`);
     const submitData = await submitResp.json();
-    const taskId = submitData?.data?.taskId || submitData?.data?.task_id || submitData?.id || submitData?.data;
+    const taskId = extractTaskId(submitData);
 
     if (!taskId) {
       const directUrl = pickFirstAudioUrl(submitData);
@@ -1880,7 +1880,7 @@
     while (i < 40) { 
       await sleep(5000);
       const r = await fetchTask(taskId);
-      const statusText = Array.isArray(r) ? 'success' : (r?.data?.status || r?.status || '');
+      const statusText = extractTaskStatus(r);
       const st = String(statusText).toLowerCase();
 
       if (st && ['failed','error','canceled','cancelled','fail'].includes(st)) {
@@ -1909,14 +1909,69 @@
     if (Array.isArray(dataArray)) {
       for (const item of dataArray) if (item?.audio_url) return item.audio_url;
     }
-    const candidates = [resp, resp?.data, resp?.data?.data, resp?.data?.data?.data];
+    const candidates = [resp, resp?.Result, resp?.data, resp?.data?.data, resp?.data?.data?.data];
     for (const obj of candidates) {
       if (Array.isArray(obj)) continue;
       const clips = obj?.clips;
       if (Array.isArray(clips)) {
         for (const c of clips) if (c?.audio_url) return c.audio_url;
       }
+      if (obj?.OutputURL) return obj.OutputURL;
+      if (obj?.AudioURL) return obj.AudioURL;
+      if (obj?.audioUrl) return obj.audioUrl;
       if (obj?.audio_url) return obj.audio_url;
+    }
+    const deepUrl = deepFindByKeys(resp, ['audio_url', 'audioUrl', 'AudioURL', 'OutputURL', 'output_url', 'url']);
+    if (typeof deepUrl === 'string' && /^https?:\/\//i.test(deepUrl)) return deepUrl;
+    return '';
+  }
+
+  function extractTaskId(resp) {
+    const direct =
+      resp?.Result?.TaskID ||
+      resp?.Result?.TaskId ||
+      resp?.data?.taskId ||
+      resp?.data?.task_id ||
+      resp?.TaskID ||
+      resp?.taskId ||
+      resp?.id;
+    if (typeof direct === 'string' && direct.trim()) return direct.trim();
+    const deep = deepFindByKeys(resp, ['TaskID', 'TaskId', 'taskId', 'task_id', 'id']);
+    return (typeof deep === 'string' && deep.trim()) ? deep.trim() : '';
+  }
+
+  function extractTaskStatus(resp) {
+    if (Array.isArray(resp)) return 'success';
+    const raw =
+      resp?.data?.status ||
+      resp?.status ||
+      resp?.Result?.Status ||
+      resp?.Result?.TaskStatus ||
+      deepFindByKeys(resp, ['status', 'Status', 'TaskStatus', 'task_status', 'state', 'State']) ||
+      '';
+    const s = String(raw).toLowerCase();
+    if (!s) return '';
+    if (['succeeded', 'finished', 'done', 'completed'].includes(s)) return 'success';
+    if (['failed', 'error', 'cancelled', 'canceled'].includes(s)) return 'failed';
+    return s;
+  }
+
+  function deepFindByKeys(obj, keys) {
+    const target = new Set(keys.map(k => String(k).toLowerCase()));
+    const stack = [obj];
+    while (stack.length) {
+      const current = stack.pop();
+      if (!current || typeof current !== 'object') continue;
+      if (Array.isArray(current)) {
+        for (const item of current) stack.push(item);
+        continue;
+      }
+      for (const [k, v] of Object.entries(current)) {
+        if (target.has(String(k).toLowerCase()) && (typeof v === 'string' || typeof v === 'number')) {
+          return v;
+        }
+        if (v && typeof v === 'object') stack.push(v);
+      }
     }
     return '';
   }

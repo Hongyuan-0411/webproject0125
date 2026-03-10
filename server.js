@@ -57,11 +57,40 @@ const AUTH_TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 60 *
 const DEFAULT_DAILY_LIMIT = Math.max(1, Number(process.env.DEFAULT_DAILY_LIMIT || 20));
 const QUOTA_TZ_OFFSET_MINUTES = Number(process.env.QUOTA_TZ_OFFSET_MINUTES || 8 * 60); // 默认按 UTC+8
 const INTERNAL_ADMIN_SECRET = String(process.env.INTERNAL_ADMIN_SECRET || '').trim();
+/*
+========================================
+旧天谱月配置（保留，不删除）
+========================================
 const TIANPUYUE_BASE_URL = 'https://api.tianpuyue.cn';
 const TIANPUYUE_API_KEY = String(process.env.TIANPUYUE_API_KEY || '').trim();
 const TIANPUYUE_MODEL = 'TemPolor v4.0';
 const TIANPUYUE_VOICE_ID = 'SV000013';
 const TIANPUYUE_CALLBACK_URL = String(process.env.TIANPUYUE_CALLBACK_URL || 'https://example.com/callback').trim();
+*/
+
+const DOUBAO_HOST = 'open.volcengineapi.com';
+const DOUBAO_BASE_URL = `https://${DOUBAO_HOST}`;
+const DOUBAO_REGION = 'cn-beijing';
+const DOUBAO_SERVICE = 'imagination';
+const DOUBAO_VERSION = '2024-08-12';
+const DOUBAO_SUBMIT_ACTION = 'GenSongForTime';
+const DOUBAO_QUERY_ACTIONS = String(
+  process.env.DOUBAO_QUERY_ACTIONS || 'QuerySongTaskForTime,QuerySongTask,QuerySongResultForTime,QuerySongResult,GetSongTaskResult'
+).split(',').map((s) => s.trim()).filter(Boolean);
+const DOUBAO_MODEL_VERSION = String(process.env.DOUBAO_MODEL_VERSION || 'v4.3').trim() || 'v4.3';
+const DOUBAO_CALLBACK_URL = String(process.env.DOUBAO_CALLBACK_URL || '').trim();
+const VOLC_AK = String(
+  process.env.VOLC_AK ||
+  process.env.VOLCENGINE_ACCESS_KEY_ID ||
+  process.env.VOLC_ACCESS_KEY_ID ||
+  ''
+).trim();
+const VOLC_SK = String(
+  process.env.VOLC_SK ||
+  process.env.VOLCENGINE_ACCESS_KEY_SECRET ||
+  process.env.VOLC_ACCESS_KEY_SECRET ||
+  ''
+).trim();
 const ALIYUN_ACCESS_KEY_ID = String(process.env.ALIYUN_ACCESS_KEY_ID || '').trim();
 const ALIYUN_ACCESS_KEY_SECRET = String(process.env.ALIYUN_ACCESS_KEY_SECRET || '').trim();
 const ALIYUN_DYPN_ENDPOINT = String(process.env.ALIYUN_DYPN_ENDPOINT || 'dypnsapi.aliyuncs.com').trim();
@@ -579,6 +608,10 @@ async function proxyJson(req, res, targetUrl, method, bodyObj, customHeaders = {
   return send(res, 200, json);
 }
 
+/*
+========================================
+旧天谱月请求函数（保留，不删除）
+========================================
 async function callTianpuyueApi(pathname, payload) {
   if (!TIANPUYUE_API_KEY) {
     throw new Error('TIANPUYUE_API_KEY not configured');
@@ -623,6 +656,188 @@ async function callTianpuyueApi(pathname, payload) {
     httpStatus: r.status,
     json,
   };
+}
+*/
+
+function sha256Hex(input) {
+  return crypto.createHash('sha256').update(input).digest('hex');
+}
+
+function hmacSha256(key, data, encoding) {
+  const h = crypto.createHmac('sha256', key).update(data);
+  return encoding ? h.digest(encoding) : h.digest();
+}
+
+function formatXDate(date = new Date()) {
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(date.getUTCDate()).padStart(2, '0');
+  const hh = String(date.getUTCHours()).padStart(2, '0');
+  const mm = String(date.getUTCMinutes()).padStart(2, '0');
+  const ss = String(date.getUTCSeconds()).padStart(2, '0');
+  return `${y}${m}${d}T${hh}${mm}${ss}Z`;
+}
+
+function getVolcSignatureKey(secretKey, shortDate, region, service) {
+  const kDate = hmacSha256(`VOLC${secretKey}`, shortDate);
+  const kRegion = hmacSha256(kDate, region);
+  const kService = hmacSha256(kRegion, service);
+  return hmacSha256(kService, 'request');
+}
+
+function buildVolcAuthHeaders({ action, version, bodyText }) {
+  if (!VOLC_AK || !VOLC_SK) {
+    throw new Error('VOLC_AK / VOLC_SK not configured');
+  }
+
+  const method = 'POST';
+  const canonicalUri = '/';
+  const canonicalQueryString = `Action=${encodeURIComponent(action)}&Version=${encodeURIComponent(version)}`;
+  const xDate = formatXDate();
+  const shortDate = xDate.slice(0, 8);
+  const payloadHash = sha256Hex(bodyText);
+
+  const canonicalHeaders =
+    `content-type:application/json\n` +
+    `host:${DOUBAO_HOST}\n` +
+    `x-content-sha256:${payloadHash}\n` +
+    `x-date:${xDate}\n`;
+  const signedHeaders = 'content-type;host;x-content-sha256;x-date';
+  const canonicalRequest =
+    `${method}\n${canonicalUri}\n${canonicalQueryString}\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
+  const credentialScope = `${shortDate}/${DOUBAO_REGION}/${DOUBAO_SERVICE}/request`;
+  const stringToSign =
+    `HMAC-SHA256\n${xDate}\n${credentialScope}\n${sha256Hex(canonicalRequest)}`;
+  const signingKey = getVolcSignatureKey(VOLC_SK, shortDate, DOUBAO_REGION, DOUBAO_SERVICE);
+  const signature = hmacSha256(signingKey, stringToSign, 'hex');
+  const authorization = `HMAC-SHA256 Credential=${VOLC_AK}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+
+  return {
+    'Host': DOUBAO_HOST,
+    'Content-Type': 'application/json',
+    'X-Date': xDate,
+    'X-Content-Sha256': payloadHash,
+    'Authorization': authorization,
+  };
+}
+
+function isActionNotFound(json) {
+  const code = String(
+    json?.ResponseMetadata?.Error?.Code ||
+    json?.ResponseMetadata?.Error?.CodeN ||
+    json?.code ||
+    json?.Code ||
+    ''
+  ).toLowerCase();
+  const msg = String(
+    json?.ResponseMetadata?.Error?.Message ||
+    json?.message ||
+    json?.Message ||
+    ''
+  ).toLowerCase();
+  return code.includes('action') || msg.includes('action') || msg.includes('invalid action');
+}
+
+function isDoubaoBizSuccess(json) {
+  const code = Number(json?.Code);
+  if (Number.isFinite(code)) return code === 0;
+  // 某些网关错误不返回 Code，交给上游 HTTP 状态处理
+  return true;
+}
+
+async function callDoubaoMusicApi(action, payload) {
+  const query = `Action=${encodeURIComponent(action)}&Version=${encodeURIComponent(DOUBAO_VERSION)}`;
+  const targetUrl = `${DOUBAO_BASE_URL}/?${query}`;
+  const reqBody = JSON.stringify(payload || {});
+  const headers = buildVolcAuthHeaders({
+    action,
+    version: DOUBAO_VERSION,
+    bodyText: reqBody,
+  });
+
+  console.log(`[${nowIso()}] >>> Doubao POST ${targetUrl}`);
+  console.log(`[${nowIso()}] >>> Doubao body: ${reqBody}`);
+
+  const r = await fetch(targetUrl, {
+    method: 'POST',
+    headers,
+    body: reqBody,
+  });
+
+  const text = await r.text();
+  console.log(`[${nowIso()}] <<< Doubao status: ${r.status} ${r.statusText}`);
+  console.log(`[${nowIso()}] <<< Doubao body: ${text}`);
+
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = { raw: text };
+  }
+
+  return {
+    ok: r.ok,
+    httpStatus: r.status,
+    json,
+    action,
+  };
+}
+
+function deepFindStringByKey(obj, candidateKeys) {
+  const keys = new Set(candidateKeys.map((k) => String(k).toLowerCase()));
+  const stack = [obj];
+  while (stack.length) {
+    const current = stack.pop();
+    if (!current || typeof current !== 'object') continue;
+    if (Array.isArray(current)) {
+      for (const item of current) stack.push(item);
+      continue;
+    }
+    for (const [k, v] of Object.entries(current)) {
+      if (keys.has(String(k).toLowerCase()) && typeof v === 'string' && v.trim()) {
+        return v.trim();
+      }
+      if (v && typeof v === 'object') stack.push(v);
+    }
+  }
+  return '';
+}
+
+function deepFindAudioUrl(obj) {
+  const stack = [obj];
+  const keySet = new Set(['audio_url', 'audiourl', 'url', 'musicurl', 'songurl', 'resulturl', 'fileurl']);
+  while (stack.length) {
+    const current = stack.pop();
+    if (!current || typeof current !== 'object') continue;
+    if (Array.isArray(current)) {
+      for (const item of current) stack.push(item);
+      continue;
+    }
+    for (const [k, v] of Object.entries(current)) {
+      if (keySet.has(String(k).toLowerCase()) && typeof v === 'string' && /^https?:\/\//i.test(v)) {
+        return v;
+      }
+      if (v && typeof v === 'object') stack.push(v);
+    }
+  }
+  return '';
+}
+
+function mapMusicVoiceToGender(voice) {
+  const v = String(voice || '').toLowerCase();
+  if (v.includes('女') || v.includes('female')) return 'Female';
+  if (v.includes('男') || v.includes('male')) return 'Male';
+  return '';
+}
+
+function mapDoubaoTaskStatus(resp) {
+  const raw = deepFindStringByKey(resp, ['Status', 'TaskStatus', 'State', 'status', 'task_status', 'state']);
+  const s = String(raw || '').toLowerCase();
+  if (!s) return '';
+  if (['success', 'succeeded', 'finished', 'done', 'completed'].includes(s)) return 'success';
+  if (['failed', 'error', 'cancelled', 'canceled', 'timeout'].includes(s)) return 'failed';
+  if (['pending', 'running', 'processing', 'queued', 'in_progress'].includes(s)) return 'running';
+  return s;
 }
 
 // DashScope 图片生成辅助函数
@@ -1047,134 +1262,142 @@ async function handler(req, res) {
       return send(res, 200, { success: true, user: publicUser(user), quota });
     }
 
-    // API: submit music generation
+    // API: submit music generation (Doubao GenSongForTime v4.3)
     if (req.method === 'POST' && url.pathname === '/api/suno/submit/music') {
       const auth = await requireAuth(req, res);
       if (!auth) return;
       const body = await readJson(req);
+
       /*
       ===========================
-      旧 Suno 提交逻辑（保留）
+      旧天谱月提交逻辑（保留）
       ===========================
-      // 根据 BASE_URL 判断使用哪个 API 格式
-      const isGetGoAPI = BASE_URL.includes('getgoapi.com');
-      const isDefAPI = BASE_URL.includes('defapi.org');
-      ...（已注释，避免删除）
-      return proxyJson(req, res, submitUrl, 'POST', payload);
-      */
-
-      const lyrics = String(body.prompt || body.lyrics || '').trim();
-      const prompt = String(body.tags || body.title || '儿童教育歌曲，旋律朗朗上口，清晰发音').trim();
-
-      if (!lyrics) {
-        return send(res, 400, { error: 'prompt/lyrics is required' });
-      }
-
       const payload = {
         prompt,
         lyrics,
-        model: TIANPUYUE_MODEL, // 固定模型
-        voice_id: TIANPUYUE_VOICE_ID, // 固定歌手音色
-        // 当前阶段不做回调消费，但接口字段为必填，使用可配置占位地址
+        model: TIANPUYUE_MODEL,
+        voice_id: TIANPUYUE_VOICE_ID,
         callback_url: TIANPUYUE_CALLBACK_URL,
       };
-
       const result = await callTianpuyueApi('/open-apis/v1/song/generate', payload);
+      */
+
+      const lyrics = String(body.Lyrics ?? body.lyrics ?? body.prompt ?? '').trim();
+      const prompt = String(body.Prompt ?? body.tags ?? body.title ?? '').trim();
+      if (!lyrics && !prompt) {
+        return send(res, 400, { error: 'Lyrics or Prompt is required' });
+      }
+
+      const gender = String(body.Gender || mapMusicVoiceToGender(body.musicVoice || '')).trim();
+      const payload = {
+        ...(lyrics ? { Lyrics: lyrics } : {}),
+        ...(prompt ? { Prompt: prompt } : {}),
+        ModelVersion: String(body.ModelVersion || DOUBAO_MODEL_VERSION),
+        ...(body.Genre ? { Genre: String(body.Genre) } : {}),
+        ...(body.Mood ? { Mood: String(body.Mood) } : {}),
+        ...(gender ? { Gender: gender } : {}),
+        ...(body.Timbre ? { Timbre: String(body.Timbre) } : {}),
+        ...(Number.isFinite(Number(body.Duration)) && Number(body.Duration) > 0 ? { Duration: Number(body.Duration) } : {}),
+        ...(DOUBAO_CALLBACK_URL ? { CallbackURL: DOUBAO_CALLBACK_URL } : {}),
+        ...(typeof body.SkipCopyCheck === 'boolean' ? { SkipCopyCheck: body.SkipCopyCheck } : {}),
+        ...(body.TosBucket ? { TosBucket: String(body.TosBucket) } : {}),
+        ...(body.ImplicitWaterMark && typeof body.ImplicitWaterMark === 'object' ? { ImplicitWaterMark: body.ImplicitWaterMark } : {}),
+        ...(body.GenreExtra ? { GenreExtra: String(body.GenreExtra) } : {}),
+        ...(body.Key ? { Key: String(body.Key) } : {}),
+        ...(body.Kmode ? { Kmode: String(body.Kmode) } : {}),
+        ...(body.Tempo ? { Tempo: String(body.Tempo) } : {}),
+        ...(body.Instrument ? { Instrument: String(body.Instrument) } : {}),
+        ...(body.Scene ? { Scene: String(body.Scene) } : {}),
+        ...(body.Lang ? { Lang: String(body.Lang) } : {}),
+        ...(body.VodFormat ? { VodFormat: String(body.VodFormat) } : {}),
+      };
+
+      const result = await callDoubaoMusicApi(DOUBAO_SUBMIT_ACTION, payload);
       if (!result.ok) {
-        return send(res, result.httpStatus || 502, {
-          success: false,
-          error: result?.json?.message || 'Tianpuyue submit failed',
-          upstream: result.json,
+        return send(res, result.httpStatus || 502, result.json || {
+          Code: -1,
+          Message: 'Doubao submit failed',
+        });
+      }
+      if (!isDoubaoBizSuccess(result.json)) {
+        return send(res, 502, result.json || {
+          Code: -1,
+          Message: 'Doubao submit failed',
         });
       }
 
-      const upstream = result.json || {};
-      const statusCode = Number(upstream.status);
-      if (statusCode !== 200000) {
-        return send(res, 502, {
-          success: false,
-          error: upstream.message || 'Tianpuyue submit failed',
-          upstream,
-        });
-      }
-
-      const firstItemId = upstream?.data?.item_ids?.[0];
-      if (!firstItemId) {
-        return send(res, 502, {
-          success: false,
-          error: 'No item_id returned from Tianpuyue',
-          upstream,
-        });
-      }
-
-      // 兼容前端既有解析：优先 data.taskId / data.task_id
-      return send(res, 200, {
-        success: true,
-        data: {
-          taskId: firstItemId,
-          task_id: firstItemId,
-          item_ids: upstream?.data?.item_ids || [firstItemId],
-        },
-        upstream,
-      });
+      return send(res, 200, result.json || {});
     }
 
-    // API: fetch task status
+    // API: fetch task status (Doubao query)
     if (req.method === 'GET' && url.pathname === '/api/suno/fetch') {
       const auth = await requireAuth(req, res);
       if (!auth) return;
-      const id = url.searchParams.get('id');
+      const id = String(url.searchParams.get('id') || '').trim();
       if (!id) return send(res, 400, { error: 'missing id' });
 
       /*
       ===========================
-      旧 Suno 查询逻辑（保留）
+      旧天谱月查询逻辑（保留）
       ===========================
-      const isGetGoAPI = BASE_URL.includes('getgoapi.com');
-      const isDefAPI = BASE_URL.includes('defapi.org');
-      let fetchUrl;
-      ...
-      return proxyJson(req, res, fetchUrl, 'GET');
+      const payload = { item_ids: [String(id)] };
+      const result = await callTianpuyueApi('/open-apis/v1/song/query', payload);
       */
 
-      const payload = {
-        item_ids: [String(id)],
-      };
-      const result = await callTianpuyueApi('/open-apis/v1/song/query', payload);
-      if (!result.ok) {
-        return send(res, result.httpStatus || 502, {
-          success: false,
-          error: result?.json?.message || 'Tianpuyue query failed',
-          upstream: result.json,
+      const payloadCandidates = [
+        { TaskID: id },
+        { TaskId: id },
+        { TaskIDs: [id] },
+        { TaskIdList: [id] },
+      ];
+
+      let finalResp = null;
+      let lastResp = null;
+      for (const action of DOUBAO_QUERY_ACTIONS) {
+        for (const payload of payloadCandidates) {
+          const resp = await callDoubaoMusicApi(action, payload);
+          lastResp = resp;
+          if (resp.ok && isDoubaoBizSuccess(resp.json) && !isActionNotFound(resp.json)) {
+            finalResp = resp;
+            break;
+          }
+          if (resp.ok && !isDoubaoBizSuccess(resp.json) && !isActionNotFound(resp.json)) {
+            return send(res, 502, resp.json || {
+              Code: -1,
+              Message: `Doubao query failed (${action})`,
+            });
+          }
+          if (!resp.ok && !isActionNotFound(resp.json)) {
+            return send(res, resp.httpStatus || 502, resp.json || {
+              Code: -1,
+              Message: `Doubao query failed (${action})`,
+            });
+          }
+        }
+        if (finalResp) break;
+      }
+
+      if (!finalResp) {
+        return send(res, lastResp?.httpStatus || 502, lastResp?.json || {
+          Code: -1,
+          Message: `Doubao query failed, no valid action found: ${DOUBAO_QUERY_ACTIONS.join(',')}`,
         });
       }
 
-      const upstream = result.json || {};
-      const statusCode = Number(upstream.status);
-      if (statusCode !== 200000) {
-        return send(res, 502, {
-          success: false,
-          error: upstream.message || 'Tianpuyue query failed',
-          upstream,
-        });
-      }
-
-      const songs = Array.isArray(upstream?.data?.songs) ? upstream.data.songs : [];
-      const song = songs.find((s) => String(s?.item_id || '') === String(id)) || songs[0] || null;
-      const mappedStatus = String(song?.status || 'running').toLowerCase();
-
-      // 兼容前端既有逻辑：
-      // 1) statusText 读取 r.data.status
-      // 2) 音频URL读取 r.data.result[i].audio_url
-      return send(res, 200, {
-        success: true,
+      // 返回豆包原生响应，同时补充兼容字段，避免前端轮询中断
+      const native = finalResp.json || {};
+      const mappedStatus = mapDoubaoTaskStatus(native) || 'running';
+      const audioUrl = deepFindAudioUrl(native);
+      const compatible = {
         status: mappedStatus,
         data: {
           status: mappedStatus,
-          result: song ? [song] : [],
-          songs,
+          result: audioUrl ? [{ audio_url: audioUrl }] : [],
         },
-        upstream,
+      };
+      return send(res, 200, {
+        ...native,
+        ...compatible,
       });
     }
 
@@ -2002,8 +2225,14 @@ server.listen(PORT, () => {
   console.log(`Proxy BASE_URL: ${BASE_URL}`);
   console.log(`Suno API Key: ${API_KEY && API_KEY.length >= 10 ? `✓ Set (${maskKey(API_KEY)})` : '✗ Not set or invalid'}`);
   console.log(`DashScope API Key: ${DASHSCOPE_API_KEY && DASHSCOPE_API_KEY.length >= 10 ? `✓ Set (${maskKey(DASHSCOPE_API_KEY)})` : '✗ Not set or invalid'}`);
+  /*
   console.log(`Tianpuyue API Key: ${TIANPUYUE_API_KEY && TIANPUYUE_API_KEY.length >= 10 ? `✓ Set (${maskKey(TIANPUYUE_API_KEY)})` : '✗ Not set or invalid'}`);
   console.log(`Tianpuyue model: ${TIANPUYUE_MODEL}, voice_id: ${TIANPUYUE_VOICE_ID}`);
+  */
+  console.log(`Doubao VOLC_AK: ${VOLC_AK && VOLC_AK.length >= 10 ? `✓ Set (${maskKey(VOLC_AK)})` : '✗ Not set or invalid'}`);
+  console.log(`Doubao VOLC_SK: ${VOLC_SK && VOLC_SK.length >= 10 ? `✓ Set (${maskKey(VOLC_SK)})` : '✗ Not set or invalid'}`);
+  console.log(`Doubao submit action: ${DOUBAO_SUBMIT_ACTION}, model version: ${DOUBAO_MODEL_VERSION}`);
+  console.log(`Doubao query actions: ${DOUBAO_QUERY_ACTIONS.join(', ')}`);
   console.log('========================================\n');
 });
 }
