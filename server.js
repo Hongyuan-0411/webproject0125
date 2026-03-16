@@ -512,6 +512,14 @@ function sendFile(res, filePath) {
 }
 
 async function readJson(req) {
+  // Vercel pre-parses JSON bodies and attaches to req.body (stream is consumed)
+  if (req.body !== undefined) {
+    if (typeof req.body === 'object' && req.body !== null) return req.body;
+    if (typeof req.body === 'string') {
+      try { return JSON.parse(req.body); } catch { return {}; }
+    }
+    return {};
+  }
   return new Promise((resolve, reject) => {
     let buf = '';
     req.on('data', (c) => (buf += c));
