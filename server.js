@@ -69,7 +69,9 @@ const TIANPUYUE_CALLBACK_URL = String(process.env.TIANPUYUE_CALLBACK_URL || 'htt
 */
 
 const DOUBAO_HOST = 'open.volcengineapi.com';
-const DOUBAO_BASE_URL = `https://${DOUBAO_HOST}`;
+const DOUBAO_BASE_URL = process.env.DOUBAO_PROXY_URL
+  ? String(process.env.DOUBAO_PROXY_URL).replace(/\/$/, '')
+  : `https://${DOUBAO_HOST}`;
 const DOUBAO_REGION = 'cn-beijing';
 const DOUBAO_SERVICE = 'imagination';
 const DOUBAO_VERSION = '2024-08-12';
