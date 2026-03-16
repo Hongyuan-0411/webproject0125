@@ -54,7 +54,7 @@ const envConfig = {}; // 禁用从 api.env 读取
 const PORT = process.env.PORT || 5173;
 const BASE_URL = (process.env.BASE_URL || 'https://api.defapi.org').replace(/\/$/, '');
 const AUTH_TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 60 * 60 * 24 * 7);
-const DEFAULT_DAILY_LIMIT = Math.max(1, Number(process.env.DEFAULT_DAILY_LIMIT || 20));
+const DEFAULT_DAILY_LIMIT = Math.max(1, Number(process.env.DEFAULT_DAILY_LIMIT || 200) );
 const QUOTA_TZ_OFFSET_MINUTES = Number(process.env.QUOTA_TZ_OFFSET_MINUTES || 8 * 60); // 默认按 UTC+8
 const INTERNAL_ADMIN_SECRET = String(process.env.INTERNAL_ADMIN_SECRET || '').trim();
 /*
