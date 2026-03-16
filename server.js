@@ -73,7 +73,7 @@ const DOUBAO_BASE_URL = `https://${DOUBAO_HOST}`;
 const DOUBAO_REGION = 'cn-beijing';
 const DOUBAO_SERVICE = 'imagination';
 const DOUBAO_VERSION = '2024-08-12';
-const DOUBAO_SUBMIT_ACTION = 'GenSongForTime';
+const DOUBAO_SUBMIT_ACTION = 'GenSongV4';
 const DOUBAO_QUERY_ACTIONS = String(
   process.env.DOUBAO_QUERY_ACTIONS || 'QuerySongTaskForTime,QuerySongTask,QuerySongResultForTime,QuerySongResult,GetSongTaskResult'
 ).split(',').map((s) => s.trim()).filter(Boolean);
@@ -679,7 +679,7 @@ function formatXDate(date = new Date()) {
 }
 
 function getVolcSignatureKey(secretKey, shortDate, region, service) {
-  const kDate = hmacSha256(`VOLC${secretKey}`, shortDate);
+  const kDate = hmacSha256(Buffer.from(secretKey, 'utf8'), shortDate);
   const kRegion = hmacSha256(kDate, region);
   const kService = hmacSha256(kRegion, service);
   return hmacSha256(kService, 'request');
@@ -1289,7 +1289,11 @@ async function handler(req, res) {
       const result = await callDoubaoMusicApi(DOUBAO_SUBMIT_ACTION, payload);
       console.log(`[${nowIso()}] <<< Doubao submit httpStatus: ${result.httpStatus}`, JSON.stringify(result.json));
 
-      if (!result.ok) return send(res, result.httpStatus, result.json);
+      if (!result.ok) {
+        // 不把 Doubao 的 401/403 透传给客户端（避免被误认为是会话鉴权失败）
+        const statusCode = [401, 403].includes(result.httpStatus) ? 502 : result.httpStatus;
+        return send(res, statusCode, { ...result.json, _doubao_http_status: result.httpStatus });
+      }
       if (!isDoubaoBizSuccess(result.json)) return send(res, 502, result.json);
       return send(res, 200, result.json);
     }
@@ -1305,7 +1309,7 @@ async function handler(req, res) {
         return send(res, 500, { error: 'VOLC_AK / VOLC_SK not configured' });
       }
 
-      const queryActions = ['QuerySong', ...DOUBAO_QUERY_ACTIONS];
+      const queryActions = ['QuerySongV4', 'QuerySong', ...DOUBAO_QUERY_ACTIONS];
       const uniqueActions = [...new Set(queryActions)];
       let lastResult = null;
       for (const action of uniqueActions) {
