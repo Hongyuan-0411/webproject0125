@@ -207,7 +207,7 @@ function publicUser(user) {
     id: user.id,
     username: user.username,
     role: user.role || 'user',
-    dailyLimit: Number(user.dailyLimit || DEFAULT_DAILY_LIMIT),
+    dailyLimit: user.dailyLimitCustomized ? Number(user.dailyLimit) : DEFAULT_DAILY_LIMIT,
     createdAt: user.createdAt,
   };
 }
@@ -391,7 +391,9 @@ async function requireAuth(req, res) {
 }
 
 async function getQuotaStatus(user) {
-  const limit = Math.max(1, Number(user.dailyLimit || DEFAULT_DAILY_LIMIT));
+  // 只有管理员通过 API 单独设置过限额的用户才使用 user.dailyLimit，
+  // 其余用户始终跟随 DEFAULT_DAILY_LIMIT 环境变量，改变量立即生效。
+  const limit = Math.max(1, user.dailyLimitCustomized ? Number(user.dailyLimit) : DEFAULT_DAILY_LIMIT);
   const dateKey = getQuotaDateKey();
   const used = Number(await kv.get(getQuotaUsedKey(user.id, dateKey)) || 0);
   return {
@@ -403,7 +405,7 @@ async function getQuotaStatus(user) {
 }
 
 async function consumeDailyQuota(user) {
-  const limit = Math.max(1, Number(user.dailyLimit || DEFAULT_DAILY_LIMIT));
+  const limit = Math.max(1, user.dailyLimitCustomized ? Number(user.dailyLimit) : DEFAULT_DAILY_LIMIT);
   const dateKey = getQuotaDateKey();
   const usedKey = getQuotaUsedKey(user.id, dateKey);
 
@@ -1281,6 +1283,7 @@ async function handler(req, res) {
       if (!user) return send(res, 404, { error: 'user not found' });
 
       user.dailyLimit = dailyLimit;
+      user.dailyLimitCustomized = true;
       user.updatedAt = nowIso();
       await kv.set(getUserKey(userId), user);
       const quota = await getQuotaStatus(user);
