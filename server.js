@@ -690,31 +690,46 @@ function buildVolcAuthHeaders({ action, version, bodyText }) {
     throw new Error('VOLC_AK / VOLC_SK not configured');
   }
 
+  // 与官方 Java SDK 保持完全一致：Content-Type 含 charset
+  const CONTENT_TYPE = 'application/json; charset=utf-8';
+
   const method = 'POST';
   const canonicalUri = '/';
-  const canonicalQueryString = `Action=${encodeURIComponent(action)}&Version=${encodeURIComponent(version)}`;
+  const canonicalQueryString = `Action=${action}&Version=${version}`;
   const xDate = formatXDate();
   const shortDate = xDate.slice(0, 8);
   const payloadHash = sha256Hex(bodyText);
 
+  // 规范化请求头（按字母序，小写 key:value\n）
   const canonicalHeaders =
-    `content-type:application/json\n` +
+    `content-type:${CONTENT_TYPE}\n` +
     `host:${DOUBAO_HOST}\n` +
     `x-content-sha256:${payloadHash}\n` +
     `x-date:${xDate}\n`;
   const signedHeaders = 'content-type;host;x-content-sha256;x-date';
   const canonicalRequest =
     `${method}\n${canonicalUri}\n${canonicalQueryString}\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
+  const hashedCanonicalRequest = sha256Hex(canonicalRequest);
   const credentialScope = `${shortDate}/${DOUBAO_REGION}/${DOUBAO_SERVICE}/request`;
   const stringToSign =
-    `HMAC-SHA256\n${xDate}\n${credentialScope}\n${sha256Hex(canonicalRequest)}`;
+    `HMAC-SHA256\n${xDate}\n${credentialScope}\n${hashedCanonicalRequest}`;
+
+  // debug: 输出签名中间值（不含密钥）
+  const maskedAk = VOLC_AK.length > 8
+    ? `${VOLC_AK.slice(0, 4)}****${VOLC_AK.slice(-4)}`
+    : '(short)';
+  console.log(`[Volc Sign] AK=${maskedAk} date=${shortDate} action=${action}`);
+  console.log(`[Volc Sign] canonicalRequest:\n${canonicalRequest}`);
+  console.log(`[Volc Sign] stringToSign:\n${stringToSign}`);
+
   const signingKey = getVolcSignatureKey(VOLC_SK, shortDate, DOUBAO_REGION, DOUBAO_SERVICE);
   const signature = hmacSha256(signingKey, stringToSign, 'hex');
+  console.log(`[Volc Sign] signature=${signature}`);
   const authorization = `HMAC-SHA256 Credential=${VOLC_AK}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
 
   return {
     'Host': DOUBAO_HOST,
-    'Content-Type': 'application/json',
+    'Content-Type': CONTENT_TYPE,
     'X-Date': xDate,
     'X-Content-Sha256': payloadHash,
     'Authorization': authorization,
