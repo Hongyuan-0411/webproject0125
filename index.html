@@ -635,6 +635,8 @@
   let registerSmsOutId = '';
   let authModalMode = 'login';
 
+  let isDecomposing = false; // 是否正在分解中
+
   // 全局音频播放器（单例）：确保切换步骤时音乐绝对不中断
   let globalAudio = null;
   let globalAudioSrc = '';
@@ -662,7 +664,12 @@
       !reqUrl.startsWith('/api/auth/') &&
       resp.status === 401
     ) {
-      applyLoggedOutState('登录已过期，请重新登录');
+      // 如果正在生成或分解中，不立即清空状态，让调用方处理错误
+      if (!isGeneratingAll && !isDecomposing) {
+        applyLoggedOutState('登录已过期，请重新登录');
+      } else {
+        console.warn('生成/分解进行中收到401，跳过自动退出，由调用方处理');
+      }
     }
     return resp;
   };
@@ -1203,6 +1210,7 @@
     decomposeStatusEl.className = 'muted';
     decomposeStatusEl.innerHTML = '<span class="loading"></span> 正在分解...';
     $('btnDecompose').disabled = true;
+    isDecomposing = true;
 
     // 显示积木拼接动画
     const buildingAnim = $('buildingAnimation');
@@ -1216,22 +1224,28 @@
       }, 1000);
 
       const characterName = $('characterName').value.trim() || '乐乐';
-      
+
       const resp = await fetch('/api/decompose-prompt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          userGoal, 
-          learningFocus, 
-          musicStyle, 
-          musicVoice, 
-          pictureBookStyle, 
+        body: JSON.stringify({
+          userGoal,
+          learningFocus,
+          musicStyle,
+          musicVoice,
+          pictureBookStyle,
           characterType,
           characterName
         }),
       }).catch(err => {
         throw new Error(`网络请求失败: ${err.message || '无法连接到服务器，请确保服务器正在运行'}`);
       });
+
+      if (resp.status === 401) {
+        isDecomposing = false;
+        applyLoggedOutState('登录已过期，请重新登录');
+        return;
+      }
 
       const data = await resp.json().catch(() => {
         return { error: '服务器返回了无效的响应格式' };
@@ -1242,6 +1256,15 @@
       }
 
       decomposedData = data.result;
+
+      // 验证步骤数量
+      if (!decomposedData || !decomposedData.steps || !Array.isArray(decomposedData.steps) || decomposedData.steps.length === 0) {
+        throw new Error('分解结果无效：未包含学习步骤');
+      }
+      if (decomposedData.steps.length !== 4) {
+        throw new Error(`分解结果包含${decomposedData.steps.length}个步骤（需要正好4个），请重试`);
+      }
+
       currentStepIndex = 0;
       stepContents = [];
       currentSessionId = null;
@@ -1266,42 +1289,39 @@
         `;
       }
 
-      if (decomposedData.steps && decomposedData.steps.length > 0) {
-        buildingStatus.textContent = '完成！进入学习步骤...';
-        
-        setTimeout(() => {
-          buildingAnim.style.display = 'none';
-          
-          $('stepsSection').style.display = 'block';
-          $('welcomeMessage').style.display = 'none';
-          $('stepsContainer').style.display = 'block';
-          
-          renderStepIndicator();
-          renderStepContents();
-          showCurrentStep();
-          updateNavigationButtons();
-          
-          setTimeout(() => {
-            generateAllSteps();
-          }, 1000);
-        }, 800);
-      } else {
+      buildingStatus.textContent = '完成！进入学习步骤...';
+
+      setTimeout(() => {
         buildingAnim.style.display = 'none';
-      }
+
+        $('stepsSection').style.display = 'block';
+        $('welcomeMessage').style.display = 'none';
+        $('stepsContainer').style.display = 'block';
+
+        renderStepIndicator();
+        renderStepContents();
+        showCurrentStep();
+        updateNavigationButtons();
+
+        setTimeout(() => {
+          generateAllSteps();
+        }, 1000);
+      }, 800);
 
       decomposeStatusEl.className = 'ok';
-      decomposeStatusEl.textContent = '✅ 分解完成！';
+      decomposeStatusEl.textContent = '✅ 分解完成！正在生成图片和音乐...';
     } catch (e) {
       console.error('Decompose error:', e);
       buildingAnim.style.display = 'none';
       decomposeStatusEl.className = 'err';
       const errorMsg = e?.message || String(e) || '未知错误';
       decomposeStatusEl.textContent = '分解失败：' + errorMsg;
-      
+
       if (errorMsg.includes('Failed to fetch') || errorMsg.includes('网络请求失败')) {
         decomposeStatusEl.textContent = '分解失败：无法连接到服务器。请确保服务器正在运行（node server.js）';
       }
     } finally {
+      isDecomposing = false;
       $('btnDecompose').disabled = false;
     }
   }
@@ -1663,18 +1683,25 @@
   async function generateAllSteps() {
     if (!currentUser) { setAuthStatus('请先登录', 'err'); return; }
     if (!decomposedData || !decomposedData.steps || decomposedData.steps.length === 0) {
-      alert('请先分解学习目标'); return;
+      $('decomposeStatus').className = 'err';
+      $('decomposeStatus').textContent = '请先分解学习目标';
+      return;
     }
     if (decomposedData.steps.length !== 4) {
-      alert('错误：必须正好有4个步骤，当前有' + decomposedData.steps.length + '个步骤'); return;
+      $('decomposeStatus').className = 'err';
+      $('decomposeStatus').textContent = `分解结果包含${decomposedData.steps.length}个步骤（需要正好4个），请重新分解`;
+      return;
     }
-    if (isGeneratingAll) { alert('正在生成中，请稍候...'); return; }
+    if (isGeneratingAll) return;
 
     isGeneratingAll = true;
     const statusEl = $('generateStatus');
+    const decomposeStatusEl = $('decomposeStatus');
     statusEl.className = 'muted';
     statusEl.textContent = '正在生成完整歌曲和组合图片，请稍候...';
-    $('btnGenerateAll').style.display = 'none'; 
+    decomposeStatusEl.className = 'ok';
+    decomposeStatusEl.textContent = '✅ 分解完成！正在生成图片和音乐...';
+    $('btnGenerateAll').style.display = 'none';
     $('btnRegenerate').disabled = true;
     $('btnPrev').disabled = true;
     $('btnNext').disabled = true;
@@ -1693,13 +1720,21 @@
         if (currentStepIndex === i) { displayStepContent(i); }
       }
 
+      // ---- 生成歌词 ----
       statusEl.textContent = '正在生成完整歌曲歌词...';
-      
+
       const lyricsResp = await fetch('/api/generate-complete-song', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ steps: decomposedData.steps, characterName, musicStyle, musicVoice }),
       });
+
+      // 检查 401 并给出明确提示
+      if (lyricsResp.status === 401) {
+        isGeneratingAll = false;
+        applyLoggedOutState('登录已过期，请重新登录后再试');
+        return;
+      }
 
       const lyricsData = await lyricsResp.json().catch(() => ({}));
       if (!lyricsResp.ok) {
@@ -1718,6 +1753,7 @@
         throw new Error('完整歌曲歌词返回格式错误：需要 steps_lyrics(长度4) 和 full_lyrics');
       }
 
+      // ---- 生成图片 ----
       statusEl.textContent = '正在生成组合图片（包含4个小图）...';
 
       const combinedImageResp = await fetch('/api/generate-combined-image', {
@@ -1727,6 +1763,12 @@
           steps: decomposedData.steps, characterName, characterDescription, characterSheet, pictureBookStyle
         }),
       });
+
+      if (combinedImageResp.status === 401) {
+        isGeneratingAll = false;
+        applyLoggedOutState('登录已过期，请重新登录后再试');
+        return;
+      }
 
       const combinedImageData = await combinedImageResp.json().catch(() => ({}));
       if (!combinedImageResp.ok) throw new Error(combinedImageData?.error || '组合图片生成失败');
@@ -1739,6 +1781,7 @@
       const croppedImages = await cropCombinedImage(combinedImageUrl);
       if (!croppedImages || croppedImages.length !== 4) throw new Error('图片裁剪失败：未能成功提取4个小图');
 
+      // ---- 生成音乐 ----
       statusEl.textContent = '正在生成完整歌曲音乐...';
 
       const joined = stepsLyrics.join('\n');
@@ -1752,15 +1795,16 @@
         audioUrl = await generateCompleteSongMusic(fullLyrics, decomposedData.steps[0].step_name, musicStyle, musicVoice);
       } catch (e) {
         audioError = e?.message || e;
+        console.warn('音乐生成失败（非致命）：', audioError);
       }
 
       if (audioUrl) ensureGlobalAudioSource(audioUrl);
 
       for (let i = 0; i < 4; i++) {
         stepContents[i] = {
-          lyrics: stepsLyrics[i], 
-          imageUrl: croppedImages[i], 
-          audioUrl: audioUrl, 
+          lyrics: stepsLyrics[i],
+          imageUrl: croppedImages[i],
+          audioUrl: audioUrl,
           audioDeleted: false,
           imageError: null,
           audioError: audioError,
@@ -1772,13 +1816,18 @@
 
       statusEl.className = 'ok';
       statusEl.textContent = '✅ 所有内容生成完成！已生成一首完整歌曲和4个小图';
-      
+      decomposeStatusEl.className = 'ok';
+      decomposeStatusEl.textContent = '✅ 分解并生成完成！';
+
       showCurrentStep();
       try { await saveHistory(); } catch (e) { }
       await refreshQuota();
     } catch (e) {
+      console.error('generateAllSteps error:', e);
       statusEl.className = 'err';
       statusEl.textContent = `❌ 生成过程中出错：${e?.message || e}`;
+      $('decomposeStatus').className = 'err';
+      $('decomposeStatus').textContent = `❌ 生成失败：${e?.message || e}`;
     } finally {
       isGeneratingAll = false;
       updateNavigationButtons();
@@ -1901,6 +1950,10 @@
   }
 
   function pickFirstAudioUrl(resp) {
+    // Suno/defapi.org: { data: [{ audio_url: "..." }] }
+    if (Array.isArray(resp?.data)) {
+      for (const item of resp.data) if (item?.audio_url) return item.audio_url;
+    }
     const resultArray = resp?.data?.result;
     if (Array.isArray(resultArray)) {
       for (const item of resultArray) if (item?.audio_url) return item.audio_url;
@@ -1927,11 +1980,19 @@
   }
 
   function extractTaskId(resp) {
+    // Suno/defapi.org 可能返回 { data: "task_id" } 纯字符串
+    if (typeof resp?.data === 'string' && resp.data.trim()) return resp.data.trim();
+    // Suno/defapi.org 可能返回 { data: [{ id: "xxx" }] } 数组
+    if (Array.isArray(resp?.data) && resp.data.length > 0) {
+      const first = resp.data[0];
+      const arrId = first?.id || first?.task_id || first?.taskId;
+      if (typeof arrId === 'string' && arrId.trim()) return arrId.trim();
+    }
     const direct =
-      resp?.Result?.TaskID ||
-      resp?.Result?.TaskId ||
       resp?.data?.taskId ||
       resp?.data?.task_id ||
+      resp?.Result?.TaskID ||
+      resp?.Result?.TaskId ||
       resp?.TaskID ||
       resp?.taskId ||
       resp?.id;
@@ -1942,7 +2003,10 @@
 
   function extractTaskStatus(resp) {
     if (Array.isArray(resp)) return 'success';
+    // Suno/defapi.org: { data: [{ status: "complete" }] }
+    const dataFirst = Array.isArray(resp?.data) && resp.data.length > 0 ? resp.data[0] : null;
     const raw =
+      dataFirst?.status ||
       resp?.data?.status ||
       resp?.status ||
       resp?.Result?.Status ||
@@ -1951,7 +2015,7 @@
       '';
     const s = String(raw).toLowerCase();
     if (!s) return '';
-    if (['succeeded', 'finished', 'done', 'completed'].includes(s)) return 'success';
+    if (['succeeded', 'finished', 'done', 'completed', 'complete'].includes(s)) return 'success';
     if (['failed', 'error', 'cancelled', 'canceled'].includes(s)) return 'failed';
     return s;
   }

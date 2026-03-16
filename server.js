@@ -1263,142 +1263,90 @@ async function handler(req, res) {
     }
 
     // API: submit music generation (Doubao GenSongForTime v4.3)
+    // API: 提交音乐生成任务（Suno via defapi.org）
     if (req.method === 'POST' && url.pathname === '/api/suno/submit/music') {
       const auth = await requireAuth(req, res);
       if (!auth) return;
       const body = await readJson(req);
 
-      /*
-      ===========================
-      旧天谱月提交逻辑（保留）
-      ===========================
-      const payload = {
-        prompt,
-        lyrics,
-        model: TIANPUYUE_MODEL,
-        voice_id: TIANPUYUE_VOICE_ID,
-        callback_url: TIANPUYUE_CALLBACK_URL,
-      };
-      const result = await callTianpuyueApi('/open-apis/v1/song/generate', payload);
-      */
-
-      const lyrics = String(body.Lyrics ?? body.lyrics ?? body.prompt ?? '').trim();
-      const prompt = String(body.Prompt ?? body.tags ?? body.title ?? '').trim();
-      if (!lyrics && !prompt) {
-        return send(res, 400, { error: 'Lyrics or Prompt is required' });
+      if (!API_KEY) {
+        return send(res, 500, { error: 'SUNO_API_KEY not configured' });
       }
 
-      const gender = String(body.Gender || mapMusicVoiceToGender(body.musicVoice || '')).trim();
+      // 直接透传前端发来的 Suno 格式字段
       const payload = {
-        ...(lyrics ? { Lyrics: lyrics } : {}),
-        ...(prompt ? { Prompt: prompt } : {}),
-        ModelVersion: String(body.ModelVersion || DOUBAO_MODEL_VERSION),
-        ...(body.Genre ? { Genre: String(body.Genre) } : {}),
-        ...(body.Mood ? { Mood: String(body.Mood) } : {}),
-        ...(gender ? { Gender: gender } : {}),
-        ...(body.Timbre ? { Timbre: String(body.Timbre) } : {}),
-        ...(Number.isFinite(Number(body.Duration)) && Number(body.Duration) > 0 ? { Duration: Number(body.Duration) } : {}),
-        ...(DOUBAO_CALLBACK_URL ? { CallbackURL: DOUBAO_CALLBACK_URL } : {}),
-        ...(typeof body.SkipCopyCheck === 'boolean' ? { SkipCopyCheck: body.SkipCopyCheck } : {}),
-        ...(body.TosBucket ? { TosBucket: String(body.TosBucket) } : {}),
-        ...(body.ImplicitWaterMark && typeof body.ImplicitWaterMark === 'object' ? { ImplicitWaterMark: body.ImplicitWaterMark } : {}),
-        ...(body.GenreExtra ? { GenreExtra: String(body.GenreExtra) } : {}),
-        ...(body.Key ? { Key: String(body.Key) } : {}),
-        ...(body.Kmode ? { Kmode: String(body.Kmode) } : {}),
-        ...(body.Tempo ? { Tempo: String(body.Tempo) } : {}),
-        ...(body.Instrument ? { Instrument: String(body.Instrument) } : {}),
-        ...(body.Scene ? { Scene: String(body.Scene) } : {}),
-        ...(body.Lang ? { Lang: String(body.Lang) } : {}),
-        ...(body.VodFormat ? { VodFormat: String(body.VodFormat) } : {}),
+        prompt: body.prompt || '',
+        tags: body.tags || '',
+        mv: body.mv || 'chirp-v4',
+        title: body.title || '',
+        make_instrumental: body.make_instrumental || false,
+        custom_mode: body.custom_mode !== undefined ? body.custom_mode : true,
       };
 
-      const result = await callDoubaoMusicApi(DOUBAO_SUBMIT_ACTION, payload);
-      if (!result.ok) {
-        return send(res, result.httpStatus || 502, result.json || {
-          Code: -1,
-          Message: 'Doubao submit failed',
-        });
-      }
-      if (!isDoubaoBizSuccess(result.json)) {
-        return send(res, 502, result.json || {
-          Code: -1,
-          Message: 'Doubao submit failed',
-        });
+      const sunoUrl = `${BASE_URL}/suno/submit/music`;
+      console.log(`[${nowIso()}] >>> Suno POST ${sunoUrl}`);
+      console.log(`[${nowIso()}] >>> Suno body:`, JSON.stringify(payload));
+
+      const headers = { 'Content-Type': 'application/json' };
+      if (USE_X_API_KEY_HEADER) {
+        headers['X-API-Key'] = API_KEY;
+      } else {
+        headers['Authorization'] = `Bearer ${API_KEY}`;
       }
 
-      return send(res, 200, result.json || {});
+      const r = await fetch(sunoUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      });
+
+      const text = await r.text();
+      console.log(`[${nowIso()}] <<< Suno submit status: ${r.status} ${r.statusText}`);
+      console.log(`[${nowIso()}] <<< Suno submit body: ${text}`);
+
+      let json;
+      try { json = JSON.parse(text); } catch { json = { raw: text }; }
+
+      if (!r.ok) {
+        return send(res, r.status, json);
+      }
+      return send(res, 200, json);
     }
 
-    // API: fetch task status (Doubao query)
+    // API: 查询音乐生成状态（Suno via defapi.org）
     if (req.method === 'GET' && url.pathname === '/api/suno/fetch') {
       const auth = await requireAuth(req, res);
       if (!auth) return;
       const id = String(url.searchParams.get('id') || '').trim();
       if (!id) return send(res, 400, { error: 'missing id' });
 
-      /*
-      ===========================
-      旧天谱月查询逻辑（保留）
-      ===========================
-      const payload = { item_ids: [String(id)] };
-      const result = await callTianpuyueApi('/open-apis/v1/song/query', payload);
-      */
-
-      const payloadCandidates = [
-        { TaskID: id },
-        { TaskId: id },
-        { TaskIDs: [id] },
-        { TaskIdList: [id] },
-      ];
-
-      let finalResp = null;
-      let lastResp = null;
-      for (const action of DOUBAO_QUERY_ACTIONS) {
-        for (const payload of payloadCandidates) {
-          const resp = await callDoubaoMusicApi(action, payload);
-          lastResp = resp;
-          if (resp.ok && isDoubaoBizSuccess(resp.json) && !isActionNotFound(resp.json)) {
-            finalResp = resp;
-            break;
-          }
-          if (resp.ok && !isDoubaoBizSuccess(resp.json) && !isActionNotFound(resp.json)) {
-            return send(res, 502, resp.json || {
-              Code: -1,
-              Message: `Doubao query failed (${action})`,
-            });
-          }
-          if (!resp.ok && !isActionNotFound(resp.json)) {
-            return send(res, resp.httpStatus || 502, resp.json || {
-              Code: -1,
-              Message: `Doubao query failed (${action})`,
-            });
-          }
-        }
-        if (finalResp) break;
+      if (!API_KEY) {
+        return send(res, 500, { error: 'SUNO_API_KEY not configured' });
       }
 
-      if (!finalResp) {
-        return send(res, lastResp?.httpStatus || 502, lastResp?.json || {
-          Code: -1,
-          Message: `Doubao query failed, no valid action found: ${DOUBAO_QUERY_ACTIONS.join(',')}`,
-        });
+      const sunoUrl = `${BASE_URL}/suno/fetch?ids=${encodeURIComponent(id)}`;
+      console.log(`[${nowIso()}] >>> Suno GET ${sunoUrl}`);
+
+      const headers = {};
+      if (USE_X_API_KEY_HEADER) {
+        headers['X-API-Key'] = API_KEY;
+      } else {
+        headers['Authorization'] = `Bearer ${API_KEY}`;
       }
 
-      // 返回豆包原生响应，同时补充兼容字段，避免前端轮询中断
-      const native = finalResp.json || {};
-      const mappedStatus = mapDoubaoTaskStatus(native) || 'running';
-      const audioUrl = deepFindAudioUrl(native);
-      const compatible = {
-        status: mappedStatus,
-        data: {
-          status: mappedStatus,
-          result: audioUrl ? [{ audio_url: audioUrl }] : [],
-        },
-      };
-      return send(res, 200, {
-        ...native,
-        ...compatible,
-      });
+      const r = await fetch(sunoUrl, { method: 'GET', headers });
+
+      const text = await r.text();
+      console.log(`[${nowIso()}] <<< Suno fetch status: ${r.status} ${r.statusText}`);
+      console.log(`[${nowIso()}] <<< Suno fetch body: ${text}`);
+
+      let json;
+      try { json = JSON.parse(text); } catch { json = { raw: text }; }
+
+      if (!r.ok) {
+        return send(res, r.status, json);
+      }
+      return send(res, 200, json);
     }
 
     // API: 分解用户目标为学习步骤（使用通义千问LLM）
@@ -1468,28 +1416,26 @@ async function handler(req, res) {
             throw new Error('Invalid response structure: missing steps array');
           }
         } catch (e) {
-          // 如果解析失败，记录详细错误并返回默认结构
-          console.warn(`[${nowIso()}] [${requestId}] Failed to parse LLM response as JSON:`, e);
-          console.warn(`[${nowIso()}] [${requestId}] Raw LLM response:`, llmResponse);
-          
-          // 返回一个有效的默认结构，确保前端能正常处理
-          parsedResult = {
-            steps: [
-              {
-                step_number: 1,
-                step_name: '学习准备',
-                step_description: '请检查API响应格式',
-                learning_objective: '确保API正常工作'
-              }
-            ],
-            character_name: '乐乐',
-            character_description: '温暖友好的伙伴',
-            parse_error: e.message,
-            raw_response: llmResponse.substring(0, 500), // 限制长度避免响应过大
-          };
+          // JSON 解析失败，返回错误而不是 fallback（避免步骤数不匹配）
+          console.error(`[${nowIso()}] [${requestId}] Failed to parse LLM response as JSON:`, e);
+          console.error(`[${nowIso()}] [${requestId}] Raw LLM response:`, llmResponse);
+          return send(res, 502, {
+            success: false,
+            error: `LLM返回格式错误，请重试。详情：${e.message}`,
+            error_type: 'decompose_parse_error',
+          });
         }
 
-        // 确保返回有效的 JSON 结构
+        // 验证步骤数量必须正好为4
+        if (parsedResult.steps.length !== 4) {
+          console.warn(`[${nowIso()}] [${requestId}] LLM returned ${parsedResult.steps.length} steps instead of 4`);
+          return send(res, 502, {
+            success: false,
+            error: `LLM返回了${parsedResult.steps.length}个步骤（需要正好4个），请重试`,
+            error_type: 'decompose_step_count_error',
+          });
+        }
+
         return send(res, 200, {
           success: true,
           result: parsedResult,
