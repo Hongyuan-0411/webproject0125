@@ -1262,91 +1262,61 @@ async function handler(req, res) {
       return send(res, 200, { success: true, user: publicUser(user), quota });
     }
 
-    // API: submit music generation (Doubao GenSongForTime v4.3)
-    // API: 提交音乐生成任务（Suno via defapi.org）
-    if (req.method === 'POST' && url.pathname === '/api/suno/submit/music') {
+    // API: 提交音乐生成任务（Doubao GenSongForTime v4.3）
+    if (req.method === 'POST' && url.pathname === '/api/music-submit') {
       const auth = await requireAuth(req, res);
       if (!auth) return;
       const body = await readJson(req);
 
-      if (!API_KEY) {
-        return send(res, 500, { error: 'SUNO_API_KEY not configured' });
+      if (!VOLC_AK || !VOLC_SK) {
+        return send(res, 500, { error: 'VOLC_AK / VOLC_SK not configured' });
       }
 
-      // 直接透传前端发来的 Suno 格式字段
       const payload = {
-        prompt: body.prompt || '',
-        tags: body.tags || '',
-        mv: body.mv || 'chirp-v4',
-        title: body.title || '',
-        make_instrumental: body.make_instrumental || false,
-        custom_mode: body.custom_mode !== undefined ? body.custom_mode : true,
+        Lyrics: String(body.lyrics || body.prompt || '').trim(),
+        ModelVersion: DOUBAO_MODEL_VERSION,
+        Genre: String(body.genre || 'Pop').trim(),
+        Mood: String(body.mood || 'Happy').trim(),
+        Duration: Number(body.duration || 60),
+        Lang: 'Chinese',
+        VodFormat: 'mp3',
+        SkipCopyCheck: true,
       };
+      if (body.gender) payload.Gender = String(body.gender).trim();
+      if (DOUBAO_CALLBACK_URL) payload.CallbackURL = DOUBAO_CALLBACK_URL;
 
-      const sunoUrl = `${BASE_URL}/suno/submit/music`;
-      console.log(`[${nowIso()}] >>> Suno POST ${sunoUrl}`);
-      console.log(`[${nowIso()}] >>> Suno body:`, JSON.stringify(payload));
+      console.log(`[${nowIso()}] >>> Doubao ${DOUBAO_SUBMIT_ACTION} payload:`, JSON.stringify(payload));
+      const result = await callDoubaoMusicApi(DOUBAO_SUBMIT_ACTION, payload);
+      console.log(`[${nowIso()}] <<< Doubao submit httpStatus: ${result.httpStatus}`, JSON.stringify(result.json));
 
-      const headers = { 'Content-Type': 'application/json' };
-      if (USE_X_API_KEY_HEADER) {
-        headers['X-API-Key'] = API_KEY;
-      } else {
-        headers['Authorization'] = `Bearer ${API_KEY}`;
-      }
-
-      const r = await fetch(sunoUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
-      });
-
-      const text = await r.text();
-      console.log(`[${nowIso()}] <<< Suno submit status: ${r.status} ${r.statusText}`);
-      console.log(`[${nowIso()}] <<< Suno submit body: ${text}`);
-
-      let json;
-      try { json = JSON.parse(text); } catch { json = { raw: text }; }
-
-      if (!r.ok) {
-        return send(res, r.status, json);
-      }
-      return send(res, 200, json);
+      if (!result.ok) return send(res, result.httpStatus, result.json);
+      if (!isDoubaoBizSuccess(result.json)) return send(res, 502, result.json);
+      return send(res, 200, result.json);
     }
 
-    // API: 查询音乐生成状态（Suno via defapi.org）
-    if (req.method === 'GET' && url.pathname === '/api/suno/fetch') {
+    // API: 查询音乐生成状态（Doubao QuerySong）
+    if (req.method === 'GET' && url.pathname === '/api/music-fetch') {
       const auth = await requireAuth(req, res);
       if (!auth) return;
       const id = String(url.searchParams.get('id') || '').trim();
       if (!id) return send(res, 400, { error: 'missing id' });
 
-      if (!API_KEY) {
-        return send(res, 500, { error: 'SUNO_API_KEY not configured' });
+      if (!VOLC_AK || !VOLC_SK) {
+        return send(res, 500, { error: 'VOLC_AK / VOLC_SK not configured' });
       }
 
-      const sunoUrl = `${BASE_URL}/suno/fetch?ids=${encodeURIComponent(id)}`;
-      console.log(`[${nowIso()}] >>> Suno GET ${sunoUrl}`);
-
-      const headers = {};
-      if (USE_X_API_KEY_HEADER) {
-        headers['X-API-Key'] = API_KEY;
-      } else {
-        headers['Authorization'] = `Bearer ${API_KEY}`;
+      const queryActions = ['QuerySong', ...DOUBAO_QUERY_ACTIONS];
+      const uniqueActions = [...new Set(queryActions)];
+      let lastResult = null;
+      for (const action of uniqueActions) {
+        const result = await callDoubaoMusicApi(action, { TaskID: id });
+        console.log(`[${nowIso()}] <<< Doubao ${action} httpStatus: ${result.httpStatus}`, JSON.stringify(result.json));
+        lastResult = result;
+        if (result.ok && !isActionNotFound(result.json)) {
+          return send(res, 200, result.json);
+        }
       }
-
-      const r = await fetch(sunoUrl, { method: 'GET', headers });
-
-      const text = await r.text();
-      console.log(`[${nowIso()}] <<< Suno fetch status: ${r.status} ${r.statusText}`);
-      console.log(`[${nowIso()}] <<< Suno fetch body: ${text}`);
-
-      let json;
-      try { json = JSON.parse(text); } catch { json = { raw: text }; }
-
-      if (!r.ok) {
-        return send(res, r.status, json);
-      }
-      return send(res, 200, json);
+      return send(res, lastResult?.httpStatus || 502, lastResult?.json || { error: 'All query actions failed' });
     }
 
     // API: 分解用户目标为学习步骤（使用通义千问LLM）
