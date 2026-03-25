@@ -421,6 +421,26 @@
     .auth-modal { background: rgba(74, 85, 104, 0.6); backdrop-filter: blur(4px); z-index: 3200;}
     .auth-modal-content { border-radius: 32px; border: 6px solid var(--brand-2); }
 
+    /* 右侧快捷操作条：减少用户在内容区与左侧操作区来回滚动 */
+    .quick-action-bar {
+      display: none;
+      gap: 10px;
+      padding: 10px;
+      border-radius: 16px;
+      border: 3px solid var(--stroke);
+      background: rgba(255, 255, 255, 0.94);
+      backdrop-filter: blur(6px);
+      z-index: 2600;
+    }
+    .quick-action-btn {
+      margin: 0;
+      flex: 1;
+      min-width: 0;
+      font-size: 15px;
+      padding: 12px 10px;
+      border-radius: 14px;
+    }
+
     /* 积木动画改造得更圆润柔和 */
     .building-animation { background: rgba(242, 248, 255, 0.95); z-index: 1000; }
     .building-title { font-size: 28px; color: var(--brand-2-shadow); font-weight: 900; }
@@ -627,6 +647,17 @@
         border-width: 4px;
         border-radius: 18px;
       }
+
+      .quick-action-bar {
+        position: fixed;
+        left: 10px;
+        right: 10px;
+        bottom: calc(10px + env(safe-area-inset-bottom));
+      }
+
+      body.quick-bar-visible {
+        padding-bottom: 94px;
+      }
     }
 
     @media (max-width: 760px) {
@@ -686,6 +717,14 @@
       .audio-control-btn {
         width: 48px;
         height: 48px;
+      }
+    }
+
+    @media (min-width: 1025px) {
+      .quick-action-bar {
+        position: sticky;
+        bottom: 0;
+        margin-top: 14px;
       }
     }
   </style>
@@ -822,6 +861,13 @@
 
       <div id="stepsContainer" style="display: none;">
         </div>
+
+      <div id="quickActionBar" class="quick-action-bar">
+        <button id="btnQuickPrev" class="quick-action-btn btn-prev">◀ 上一步</button>
+        <button id="btnQuickNext" class="quick-action-btn btn-next">下一步 ▶</button>
+        <button id="btnQuickRegenerate" class="quick-action-btn btn-regenerate">🔄 重生成</button>
+        <button id="btnQuickHistory" class="quick-action-btn history-btn">📚 历史</button>
+      </div>
     </div>
   </div>
 
@@ -1888,6 +1934,7 @@
       $('btnNext').disabled = true;
       $('btnRegenerate').disabled = true;
       $('btnDeleteMusic').disabled = true;
+      syncQuickActionBar();
       return;
     }
     const totalSteps = decomposedData.steps.length;
@@ -1897,6 +1944,26 @@
     $('btnRegenerate').disabled = !currentUser || !stepContents[currentStepIndex];
     const hasAudio = !!stepContents.find((item) => item && item.audioUrl && !item.audioDeleted);
     $('btnDeleteMusic').disabled = !currentUser || !currentSessionId || !hasAudio;
+    syncQuickActionBar();
+  }
+
+  function syncQuickActionBar() {
+    const bar = $('quickActionBar');
+    if (!bar) return;
+
+    const hasSteps = !!(decomposedData && decomposedData.steps && decomposedData.steps.length);
+    const visible = !!currentUser && hasSteps;
+    bar.style.display = visible ? 'flex' : 'none';
+
+    const isMobileLayout = window.matchMedia('(max-width: 1024px)').matches;
+    document.body.classList.toggle('quick-bar-visible', visible && isMobileLayout);
+
+    const quickPrev = $('btnQuickPrev');
+    const quickNext = $('btnQuickNext');
+    const quickRegenerate = $('btnQuickRegenerate');
+    if (quickPrev) quickPrev.disabled = $('btnPrev').disabled;
+    if (quickNext) quickNext.disabled = $('btnNext').disabled;
+    if (quickRegenerate) quickRegenerate.disabled = $('btnRegenerate').disabled;
   }
 
   function goToPrevStep() {
@@ -2901,6 +2968,12 @@
   $('btnNext').addEventListener('click', goToNextStep);
   $('btnRegenerate').addEventListener('click', regenerateCurrentStep);
   $('btnGenerateAll').addEventListener('click', generateAllSteps);
+  $('btnQuickPrev').addEventListener('click', goToPrevStep);
+  $('btnQuickNext').addEventListener('click', goToNextStep);
+  $('btnQuickRegenerate').addEventListener('click', regenerateCurrentStep);
+  $('btnQuickHistory').addEventListener('click', showHistoryModal);
+  window.addEventListener('resize', syncQuickActionBar);
+  syncQuickActionBar();
   restoreLogin();
 </script>
 </body>
