@@ -278,6 +278,119 @@ function getHistoryIndexKey(userId) {
   return `history:index:user:${userId}`;
 }
 
+function parseUrlExpireAtMs(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const expiresRaw = u.searchParams.get('Expires');
+    if (!expiresRaw) return 0;
+    const expiresSec = Number(expiresRaw);
+    if (!Number.isFinite(expiresSec) || expiresSec <= 0) return 0;
+    return expiresSec * 1000;
+  } catch {
+    return 0;
+  }
+}
+
+function isLikelyTemporaryImageUrl(url) {
+  const text = String(url || '');
+  if (!text || !/^https?:\/\//i.test(text)) return false;
+  return (
+    text.includes('dashscope-result') ||
+    text.includes('oss-cn-') ||
+    /[?&]Expires=\d+/i.test(text) ||
+    /[?&]Signature=/i.test(text) ||
+    /[?&]OSSAccessKeyId=/i.test(text)
+  );
+}
+
+function isVercelBlobUrl(url) {
+  const text = String(url || '');
+  return text.includes('.blob.vercel-storage.com');
+}
+
+function isExpiredTemporaryUrl(url) {
+  const expiresAt = parseUrlExpireAtMs(url);
+  if (!expiresAt) return false;
+  return Date.now() > expiresAt;
+}
+
+async function mirrorImageUrlToBlob(sessionId, stepNumber, imageUrl) {
+  const imageResp = await fetch(imageUrl);
+  if (!imageResp.ok) {
+    throw new Error(`fetch image failed: ${imageResp.status}`);
+  }
+  const imageBuffer = await imageResp.arrayBuffer();
+  const key = `${sessionId}/step_${stepNumber}_image.png`;
+  const blob = await put(key, Buffer.from(imageBuffer), {
+    access: 'public',
+    contentType: 'image/png',
+    addRandomSuffix: false,
+  });
+  return blob.url;
+}
+
+async function normalizeHistoryStepContents(userId, sessionId, stepContentsRaw) {
+  const stepContents = Array.isArray(stepContentsRaw) ? stepContentsRaw : [];
+  let changed = false;
+
+  const nextStepContents = await Promise.all(stepContents.map(async (item, index) => {
+    const stepNumber = index + 1;
+    const stepItem = (item && typeof item === 'object') ? { ...item } : {};
+    const stepCacheKey = getStepCacheKey(userId, sessionId, stepNumber);
+
+    let cache = null;
+    try {
+      cache = await kv.hgetall(stepCacheKey);
+    } catch {
+      cache = null;
+    }
+
+    const cacheImageUrl = String(cache?.imageUrl || '').trim();
+    const currentImageUrl = String(stepItem.imageUrl || '').trim();
+    let finalImageUrl = cacheImageUrl || currentImageUrl;
+
+    // 优先使用 step cache 中的 Blob 永久链接，修复旧历史中的临时 URL。
+    if (cacheImageUrl && cacheImageUrl !== currentImageUrl) {
+      stepItem.imageUrl = cacheImageUrl;
+      finalImageUrl = cacheImageUrl;
+      changed = true;
+    }
+
+    // 只有临时 URL 时，尝试迁移到 Blob，避免导入历史时图片过期。
+    if (finalImageUrl && !isVercelBlobUrl(finalImageUrl) && isLikelyTemporaryImageUrl(finalImageUrl)) {
+      if (isExpiredTemporaryUrl(finalImageUrl)) {
+        stepItem.imageUrl = null;
+        if (!stepItem.imageError) {
+          stepItem.imageError = '历史图片链接已过期，请重新生成图片';
+        }
+        changed = true;
+      } else {
+        try {
+          const mirroredUrl = await mirrorImageUrlToBlob(sessionId, stepNumber, finalImageUrl);
+          if (mirroredUrl && mirroredUrl !== finalImageUrl) {
+            stepItem.imageUrl = mirroredUrl;
+            stepItem.imageError = null;
+            changed = true;
+            await kv.hset(stepCacheKey, {
+              imageUrl: mirroredUrl,
+              updatedAt: nowIso(),
+            });
+          }
+        } catch (e) {
+          console.warn(`[${nowIso()}] mirror history image failed session=${sessionId} step=${stepNumber}:`, e?.message || e);
+        }
+      }
+    }
+
+    return stepItem;
+  }));
+
+  return {
+    stepContents: nextStepContents,
+    changed,
+  };
+}
+
 let dypnsClient = null;
 function getDypnsClient() {
   if (dypnsClient) return dypnsClient;
@@ -1938,6 +2051,18 @@ async function handler(req, res) {
         const historyData = await kv.get(getHistoryDataKey(auth.user.id, sessionId));
         if (!historyData) {
           return send(res, 404, { error: 'History not found' });
+        }
+
+        const normalized = await normalizeHistoryStepContents(
+          auth.user.id,
+          sessionId,
+          historyData.stepContents
+        );
+
+        if (normalized.changed) {
+          historyData.stepContents = normalized.stepContents;
+          historyData.updatedAt = nowIso();
+          await kv.set(getHistoryDataKey(auth.user.id, sessionId), historyData);
         }
 
         return send(res, 200, { success: true, data: historyData });
