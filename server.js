@@ -57,6 +57,18 @@ const AUTH_TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL_SECONDS || 60 *
 const DEFAULT_DAILY_LIMIT = Math.max(1, Number(process.env.DEFAULT_DAILY_LIMIT || 1) );
 const QUOTA_TZ_OFFSET_MINUTES = Number(process.env.QUOTA_TZ_OFFSET_MINUTES || 8 * 60); // 默认按 UTC+8
 const INTERNAL_ADMIN_SECRET = String(process.env.INTERNAL_ADMIN_SECRET || '').trim();
+const NODE_ENV = String(process.env.NODE_ENV || 'development').toLowerCase();
+const ENABLE_VERBOSE_LOGS = String(
+  process.env.ENABLE_VERBOSE_LOGS || (NODE_ENV === 'production' ? '0' : '1')
+).trim() === '1';
+const ENABLE_HEADER_LOGS = String(
+  process.env.ENABLE_HEADER_LOGS || (ENABLE_VERBOSE_LOGS ? '1' : '0')
+).trim() === '1';
+const DECOMPOSE_MAX_CONCURRENCY = Math.max(1, Number(process.env.DECOMPOSE_MAX_CONCURRENCY || 8));
+const DECOMPOSE_MAX_QUEUE = Math.max(0, Number(process.env.DECOMPOSE_MAX_QUEUE || 120));
+const UPSTREAM_MAX_RETRIES = Math.max(0, Number(process.env.UPSTREAM_MAX_RETRIES || 2));
+const UPSTREAM_RETRY_BASE_MS = Math.max(100, Number(process.env.UPSTREAM_RETRY_BASE_MS || 300));
+const UPSTREAM_RETRY_MAX_DELAY_MS = Math.max(500, Number(process.env.UPSTREAM_RETRY_MAX_DELAY_MS || 5000));
 /*
 ========================================
 旧天谱月配置（保留，不删除）
@@ -149,6 +161,12 @@ function maskKey(key) {
   return key.substring(0, 4) + '...' + key.substring(key.length - 4);
 }
 
+function logVerbose(...args) {
+  if (ENABLE_VERBOSE_LOGS) {
+    console.log(...args);
+  }
+}
+
 function normalizeUsername(username) {
   return String(username || '').trim().toLowerCase();
 }
@@ -183,17 +201,26 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(String(token || '')).digest('hex');
 }
 
-function hashPassword(password) {
+function scryptAsync(password, salt, keyLen = 64) {
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(String(password), salt, keyLen, (err, derivedKey) => {
+      if (err) return reject(err);
+      resolve(derivedKey);
+    });
+  });
+}
+
+async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
+  const hash = (await scryptAsync(password, salt, 64)).toString('hex');
   return `scrypt$${salt}$${hash}`;
 }
 
-function verifyPassword(password, passwordHash) {
+async function verifyPassword(password, passwordHash) {
   try {
     const [algo, salt, expectedHex] = String(passwordHash || '').split('$');
     if (algo !== 'scrypt' || !salt || !expectedHex) return false;
-    const actual = crypto.scryptSync(String(password), salt, 64);
+    const actual = await scryptAsync(password, salt, 64);
     const expected = Buffer.from(expectedHex, 'hex');
     if (actual.length !== expected.length) return false;
     return crypto.timingSafeEqual(actual, expected);
@@ -654,16 +681,110 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+let decomposeActiveCount = 0;
+const decomposeWaitQueue = [];
+
+function getDecomposeQueueStats() {
+  return {
+    active: decomposeActiveCount,
+    queued: decomposeWaitQueue.length,
+    maxConcurrency: DECOMPOSE_MAX_CONCURRENCY,
+    maxQueue: DECOMPOSE_MAX_QUEUE,
+  };
+}
+
+async function acquireDecomposeSlot() {
+  if (decomposeActiveCount < DECOMPOSE_MAX_CONCURRENCY) {
+    decomposeActiveCount += 1;
+    return { ok: true, queued: false, ...getDecomposeQueueStats() };
+  }
+
+  if (decomposeWaitQueue.length >= DECOMPOSE_MAX_QUEUE) {
+    return { ok: false, reason: 'queue_full', ...getDecomposeQueueStats() };
+  }
+
+  await new Promise((resolve) => decomposeWaitQueue.push(resolve));
+  decomposeActiveCount += 1;
+  return { ok: true, queued: true, ...getDecomposeQueueStats() };
+}
+
+function releaseDecomposeSlot() {
+  decomposeActiveCount = Math.max(0, decomposeActiveCount - 1);
+  const next = decomposeWaitQueue.shift();
+  if (next) next();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfterMs(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return 0;
+  const asNumber = Number(raw);
+  if (Number.isFinite(asNumber) && asNumber >= 0) return asNumber * 1000;
+  const asDateMs = Date.parse(raw);
+  if (Number.isFinite(asDateMs)) {
+    return Math.max(0, asDateMs - Date.now());
+  }
+  return 0;
+}
+
+function computeRetryDelayMs(attempt, retryAfterMs = 0) {
+  if (retryAfterMs > 0) {
+    return Math.min(UPSTREAM_RETRY_MAX_DELAY_MS, retryAfterMs);
+  }
+  const base = Math.min(UPSTREAM_RETRY_MAX_DELAY_MS, UPSTREAM_RETRY_BASE_MS * (2 ** attempt));
+  const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(base * 0.3)));
+  return base + jitter;
+}
+
+function shouldRetryUpstreamStatus(status) {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+async function fetchWithRetry(targetUrl, options = {}, meta = {}) {
+  let lastResponse = null;
+  let lastError = null;
+  const label = String(meta?.label || 'upstream');
+
+  for (let attempt = 0; attempt <= UPSTREAM_MAX_RETRIES; attempt += 1) {
+    try {
+      const resp = await fetch(targetUrl, options);
+      lastResponse = resp;
+
+      if (shouldRetryUpstreamStatus(resp.status) && attempt < UPSTREAM_MAX_RETRIES) {
+        const retryAfterMs = parseRetryAfterMs(resp.headers?.get?.('retry-after'));
+        const delay = computeRetryDelayMs(attempt, retryAfterMs);
+        console.warn(`[${nowIso()}] [retry] ${label} status=${resp.status}, attempt=${attempt + 1}/${UPSTREAM_MAX_RETRIES + 1}, delay=${delay}ms`);
+        await sleep(delay);
+        continue;
+      }
+
+      return resp;
+    } catch (e) {
+      lastError = e;
+      if (attempt >= UPSTREAM_MAX_RETRIES) break;
+      const delay = computeRetryDelayMs(attempt, 0);
+      console.warn(`[${nowIso()}] [retry] ${label} network error on attempt=${attempt + 1}/${UPSTREAM_MAX_RETRIES + 1}, delay=${delay}ms, err=${e?.message || e}`);
+      await sleep(delay);
+    }
+  }
+
+  if (lastResponse) return lastResponse;
+  throw lastError || new Error(`${label} fetch failed`);
+}
+
 async function proxyJson(req, res, targetUrl, method, bodyObj, customHeaders = {}) {
   const reqBodyText = bodyObj ? JSON.stringify(bodyObj) : undefined;
 
   // 打印"全文"（请求 body）以及目标 URL，便于核对是否真的发出了内容
   console.log(`\n[${nowIso()}] >>> proxy ${method} ${targetUrl}`);
   if (reqBodyText !== undefined) {
-    console.log(`[${nowIso()}] >>> request body (FULL):`);
-    console.log(reqBodyText);
+    logVerbose(`[${nowIso()}] >>> request body (FULL):`);
+    logVerbose(reqBodyText);
   } else {
-    console.log(`[${nowIso()}] >>> request body: <empty>`);
+    logVerbose(`[${nowIso()}] >>> request body: <empty>`);
   }
 
   // 构建请求头
@@ -678,13 +799,13 @@ async function proxyJson(req, res, targetUrl, method, bodyObj, customHeaders = {
     if (USE_X_API_KEY_HEADER) {
       // 方式1: 使用 X-API-Key header（某些 API 使用这种方式）
       headers['X-API-Key'] = API_KEY;
-      console.log(`[${nowIso()}] >>> Using X-API-Key header: ${maskKey(API_KEY)}`);
+      logVerbose(`[${nowIso()}] >>> Using X-API-Key header: ${maskKey(API_KEY)}`);
     } else {
       // 方式2: Authorization: Bearer {token}（标准方式，默认）
       headers['Authorization'] = `Bearer ${API_KEY}`;
-      console.log(`[${nowIso()}] >>> Using Authorization: Bearer ${maskKey(API_KEY)}`);
+      logVerbose(`[${nowIso()}] >>> Using Authorization: Bearer ${maskKey(API_KEY)}`);
     }
-    console.log(`[${nowIso()}] >>> API Key length: ${API_KEY.length} characters`);
+    logVerbose(`[${nowIso()}] >>> API Key length: ${API_KEY.length} characters`);
   } else {
     console.warn(`[${nowIso()}] >>> WARNING: No API_KEY provided for request to ${targetUrl}`);
   }
@@ -693,11 +814,13 @@ async function proxyJson(req, res, targetUrl, method, bodyObj, customHeaders = {
   let text;
   try {
     // 连接超时在某些网络环境会频繁发生，这里做更强健的错误处理，避免直接崩溃
-    r = await fetch(targetUrl, {
-    method,
-    headers,
-    body: reqBodyText,
-  });
+    r = await fetchWithRetry(targetUrl, {
+      method,
+      headers,
+      body: reqBodyText,
+    }, {
+      label: `proxy ${method} ${targetUrl}`,
+    });
     text = await r.text();
   } catch (e) {
     console.error(`[${nowIso()}] <<< fetch ERROR:`, e);
@@ -711,8 +834,8 @@ async function proxyJson(req, res, targetUrl, method, bodyObj, customHeaders = {
   }
 
   console.log(`[${nowIso()}] <<< response status: ${r.status} ${r.statusText}`);
-  console.log(`[${nowIso()}] <<< response body (FULL):`);
-  console.log(text);
+  logVerbose(`[${nowIso()}] <<< response body (FULL):`);
+  logVerbose(text);
 
   let json;
   try { json = JSON.parse(text); } catch { json = { raw: text }; }
@@ -843,13 +966,13 @@ function buildVolcAuthHeaders({ action, version, bodyText }) {
   const maskedAk = VOLC_AK.length > 8
     ? `${VOLC_AK.slice(0, 4)}****${VOLC_AK.slice(-4)}`
     : '(short)';
-  console.log(`[Volc Sign] AK=${maskedAk} date=${shortDate} action=${action}`);
-  console.log(`[Volc Sign] canonicalRequest:\n${canonicalRequest}`);
-  console.log(`[Volc Sign] stringToSign:\n${stringToSign}`);
+  logVerbose(`[Volc Sign] AK=${maskedAk} date=${shortDate} action=${action}`);
+  logVerbose(`[Volc Sign] canonicalRequest:\n${canonicalRequest}`);
+  logVerbose(`[Volc Sign] stringToSign:\n${stringToSign}`);
 
   const signingKey = getVolcSignatureKey(VOLC_SK, shortDate, DOUBAO_REGION, DOUBAO_SERVICE);
   const signature = hmacSha256(signingKey, stringToSign, 'hex');
-  console.log(`[Volc Sign] signature=${signature}`);
+  logVerbose(`[Volc Sign] signature=${signature}`);
   const authorization = `HMAC-SHA256 Credential=${VOLC_AK}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
 
   return {
@@ -896,17 +1019,19 @@ async function callDoubaoMusicApi(action, payload) {
   });
 
   console.log(`[${nowIso()}] >>> Doubao POST ${targetUrl}`);
-  console.log(`[${nowIso()}] >>> Doubao body: ${reqBody}`);
+  logVerbose(`[${nowIso()}] >>> Doubao body: ${reqBody}`);
 
-  const r = await fetch(targetUrl, {
+  const r = await fetchWithRetry(targetUrl, {
     method: 'POST',
     headers,
     body: reqBody,
+  }, {
+    label: `doubao:${action}`,
   });
 
   const text = await r.text();
   console.log(`[${nowIso()}] <<< Doubao status: ${r.status} ${r.statusText}`);
-  console.log(`[${nowIso()}] <<< Doubao body: ${text}`);
+  logVerbose(`[${nowIso()}] <<< Doubao body: ${text}`);
 
   let json;
   try {
@@ -1007,20 +1132,22 @@ async function callQwenLLM(messages, model = 'qwen-plus') {
   };
 
   console.log(`[${nowIso()}] >>> DashScope (Qwen LLM) text generation request`);
-  console.log(`[${nowIso()}] >>> request body:`, JSON.stringify(payload, null, 2));
+  logVerbose(`[${nowIso()}] >>> request body:`, JSON.stringify(payload, null, 2));
 
-  const r = await fetch(DASHSCOPE_LLM_API_URL, {
+  const r = await fetchWithRetry(DASHSCOPE_LLM_API_URL, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${DASHSCOPE_API_KEY}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(payload),
+  }, {
+    label: 'dashscope-llm',
   });
 
   const text = await r.text();
   console.log(`[${nowIso()}] <<< DashScope LLM response status: ${r.status} ${r.statusText}`);
-  console.log(`[${nowIso()}] <<< DashScope LLM response body:`, text);
+  logVerbose(`[${nowIso()}] <<< DashScope LLM response body:`, text);
 
   let json;
   try {
@@ -1091,21 +1218,23 @@ async function generateImageDashScope(prompt, size, negativePrompt, promptExtend
   }
 
   console.log(`[${nowIso()}] >>> DashScope (Qwen-image) image generation request`);
-  console.log(`[${nowIso()}] >>> request body:`, JSON.stringify(payload, null, 2));
+  logVerbose(`[${nowIso()}] >>> request body:`, JSON.stringify(payload, null, 2));
 
   
-  const r = await fetch(DASHSCOPE_API_URL, {
+  const r = await fetchWithRetry(DASHSCOPE_API_URL, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${DASHSCOPE_API_KEY}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(payload),
+  }, {
+    label: 'dashscope-image',
   });
 
   const text = await r.text();
   console.log(`[${nowIso()}] <<< DashScope response status: ${r.status} ${r.statusText}`);
-  console.log(`[${nowIso()}] <<< DashScope response body:`, text);
+  logVerbose(`[${nowIso()}] <<< DashScope response body:`, text);
 
   let json;
   try {
@@ -1134,7 +1263,9 @@ async function handler(req, res) {
   
   // 记录所有请求
   console.log(`[${nowIso()}] [${requestId}] ${req.method} ${req.url}`);
-  console.log(`[${nowIso()}] [${requestId}] Headers:`, JSON.stringify(req.headers, null, 2));
+  if (ENABLE_HEADER_LOGS) {
+    console.log(`[${nowIso()}] [${requestId}] Headers:`, JSON.stringify(req.headers, null, 2));
+  }
   
   try {
     // 处理 Vercel serverless 和本地开发的 URL 解析
@@ -1288,7 +1419,7 @@ async function handler(req, res) {
         username: phoneNumber,
         phoneNumber,
         usernameNormalized,
-        passwordHash: hashPassword(password),
+        passwordHash: await hashPassword(password),
         role: 'user',
         status: 'active',
         dailyLimit: DEFAULT_DAILY_LIMIT,
@@ -1331,7 +1462,7 @@ async function handler(req, res) {
         return send(res, 401, { error: '手机号或密码错误' });
       }
 
-      if (!verifyPassword(password, user.passwordHash)) {
+      if (!await verifyPassword(password, user.passwordHash)) {
         return send(res, 401, { error: '手机号或密码错误' });
       }
 
@@ -1419,16 +1550,23 @@ async function handler(req, res) {
         Genre: String(body.genre || 'Pop').trim(),
         Mood: String(body.mood || 'Happy').trim(),
         Duration: Number(body.duration || 60),
-        Lang: 'Chinese',
+        Lang: String(body.lang || 'Chinese').trim(),
         VodFormat: 'mp3',
         SkipCopyCheck: true,
       };
       if (body.gender) payload.Gender = String(body.gender).trim();
+      // V4.3 直传字段
+      if (body.timbre) payload.Timbre = String(body.timbre).trim();
+      if (body.kmode) payload.Kmode = String(body.kmode).trim();
+      if (body.tempo) payload.Tempo = String(body.tempo).trim();
+      if (body.instrument) payload.Instrument = String(body.instrument).trim();
+      if (body.scene) payload.Scene = String(body.scene).trim();
       if (DOUBAO_CALLBACK_URL) payload.CallbackURL = DOUBAO_CALLBACK_URL;
 
-      console.log(`[${nowIso()}] >>> Doubao ${DOUBAO_SUBMIT_ACTION} payload:`, JSON.stringify(payload));
+      logVerbose(`[${nowIso()}] >>> Doubao ${DOUBAO_SUBMIT_ACTION} payload:`, JSON.stringify(payload));
       const result = await callDoubaoMusicApi(DOUBAO_SUBMIT_ACTION, payload);
-      console.log(`[${nowIso()}] <<< Doubao submit httpStatus: ${result.httpStatus}`, JSON.stringify(result.json));
+      console.log(`[${nowIso()}] <<< Doubao submit httpStatus: ${result.httpStatus}`);
+      logVerbose(`[${nowIso()}] <<< Doubao submit body:`, JSON.stringify(result.json));
 
       if (!result.ok) {
         // 不把 Doubao 的 401/403 透传给客户端（避免被误认为是会话鉴权失败）
@@ -1455,7 +1593,8 @@ async function handler(req, res) {
       let lastResult = null;
       for (const action of uniqueActions) {
         const result = await callDoubaoMusicApi(action, { TaskID: id });
-        console.log(`[${nowIso()}] <<< Doubao ${action} httpStatus: ${result.httpStatus}`, JSON.stringify(result.json));
+        console.log(`[${nowIso()}] <<< Doubao ${action} httpStatus: ${result.httpStatus}`);
+        logVerbose(`[${nowIso()}] <<< Doubao ${action} body:`, JSON.stringify(result.json));
         lastResult = result;
         if (result.ok && !isActionNotFound(result.json)) {
           return send(res, 200, result.json);
@@ -1475,16 +1614,16 @@ async function handler(req, res) {
         return send(res, 500, { error: 'DASHSCOPE_API_KEY not configured' });
       }
 
-      console.log(`[${nowIso()}] [${requestId}] Reading request body...`);
+      logVerbose(`[${nowIso()}] [${requestId}] Reading request body...`);
       const body = await readJson(req);
-      console.log(`[${nowIso()}] [${requestId}] Request body:`, JSON.stringify(body, null, 2));
+      logVerbose(`[${nowIso()}] [${requestId}] Request body:`, JSON.stringify(body, null, 2));
       
-      const { 
-        userGoal, 
-        learningFocus, 
-        musicStyle, 
-        musicVoice, 
-        pictureBookStyle, 
+      const {
+        userGoal,
+        learningFocus,
+        musicMood,
+        musicVoice,
+        pictureBookStyle,
         characterType,
         characterName
       } = body;
@@ -1493,12 +1632,26 @@ async function handler(req, res) {
         return send(res, 400, { error: 'userGoal is required' });
       }
 
+      const queueAdmission = await acquireDecomposeSlot();
+      if (!queueAdmission.ok) {
+        return send(res, 429, {
+          success: false,
+          error: '系统繁忙，分解请求排队已满，请稍后重试',
+          code: 'DECOMPOSE_QUEUE_FULL',
+          queue: getDecomposeQueueStats(),
+        });
+      }
+      if (queueAdmission.queued) {
+        const stats = getDecomposeQueueStats();
+        console.warn(`[${nowIso()}] [${requestId}] decompose queued, active=${stats.active}, queued=${stats.queued}`);
+      }
+
       try {
         // 使用提示词工程生成分解提示词
         const decomposePrompt = prompts.getDecomposePrompt(
           userGoal.trim(),
           learningFocus || '',
-          musicStyle || '欢快',
+          musicMood || '欢快',
           musicVoice,
           pictureBookStyle || '童话',
           characterType || '男生',
@@ -1564,6 +1717,8 @@ async function handler(req, res) {
           error: errorMessage,
           error_type: 'decompose_error'
         });
+      } finally {
+        releaseDecomposeSlot();
       }
     }
 
@@ -1576,7 +1731,7 @@ async function handler(req, res) {
       }
 
       const body = await readJson(req);
-      const { step, characterName, musicStyle, musicVoice, stepNumber, totalSteps } = body;
+      const { step, characterName, musicMood, musicVoice, stepNumber, totalSteps, musicDuration } = body;
 
       if (!step || !characterName) {
         return send(res, 400, { error: 'step and characterName are required' });
@@ -1587,13 +1742,14 @@ async function handler(req, res) {
         const lyricsPrompt = prompts.getLyricsPrompt(
           step,
           characterName,
-          musicStyle || '欢快',
+          musicMood || '欢快',
           (musicVoice && String(musicVoice).trim()) ? String(musicVoice).trim() : '男生',
           stepNumber || 1,
-          totalSteps || 1
+          totalSteps || 1,
+          Number(musicDuration) || 60
         );
 
-        // 调用通义千问LLM（要求返回严格JSON：{ fixed_prefix, steps_lyrics[4] }）
+        // 调用通义千问LLM（返回纯文本歌词）
         const raw = await callQwenLLM([
           {
             role: 'user',
@@ -1601,37 +1757,18 @@ async function handler(req, res) {
           },
         ]);
 
-        let parsed;
-        try {
-          parsed = JSON.parse(String(raw).trim());
-        } catch (e) {
-          throw new Error('完整歌曲歌词返回不是合法JSON，请检查prompt或模型输出：' + (e?.message || e));
+        // 清理LLM输出（去除可能的markdown代码块包裹）
+        let lyrics = String(raw || '').trim();
+        const mdMatch = lyrics.match(/```(?:\w*)\s*([\s\S]*?)\s*```/);
+        if (mdMatch) lyrics = mdMatch[1].trim();
+
+        if (!lyrics) {
+          throw new Error('歌词生成结果为空');
         }
-
-        const fixedPrefix = String(parsed?.fixed_prefix || '').trim();
-        const stepsLyrics = parsed?.steps_lyrics;
-
-        if (!Array.isArray(stepsLyrics) || stepsLyrics.length !== 4) {
-          throw new Error('完整歌曲歌词JSON格式错误：steps_lyrics 必须为长度=4的数组');
-        }
-
-        const normalizedStepsLyrics = stepsLyrics.map((s, idx) => {
-          const line = String(s ?? '').trim();
-          if (!line) throw new Error(`第${idx + 1}步歌词为空`);
-          if (/[\r\n]/.test(line)) throw new Error(`第${idx + 1}步歌词包含换行符（不允许）`);
-          if (fixedPrefix && !line.startsWith(fixedPrefix)) {
-            throw new Error(`第${idx + 1}步歌词未以固定句头“${fixedPrefix}”开头`);
-          }
-          return line;
-        });
-
-        const fullLyrics = normalizedStepsLyrics.join('\n');
 
         return send(res, 200, {
           success: true,
-          fixed_prefix: fixedPrefix,
-          steps_lyrics: normalizedStepsLyrics,
-          full_lyrics: fullLyrics,
+          lyrics: lyrics,
         });
       } catch (e) {
         console.error(`[${nowIso()}] Generate lyrics error:`, e);
@@ -1658,7 +1795,7 @@ async function handler(req, res) {
       }
 
       const body = await readJson(req);
-      const { steps, characterName, musicStyle, musicVoice } = body;
+      const { steps, characterName, musicMood, musicVoice, musicDuration } = body;
 
       if (!steps || !Array.isArray(steps) || steps.length !== 4) {
         return send(res, 400, { error: 'steps must be an array with exactly 4 steps' });
@@ -1670,24 +1807,27 @@ async function handler(req, res) {
 
       try {
         // 验证并记录参数
-        const finalMusicStyle = musicStyle || '欢快';
+        const finalMusicMood = musicMood || '欢快';
         const finalMusicVoice = (musicVoice && String(musicVoice).trim()) ? String(musicVoice).trim() : '男生';
+        const finalDuration = Number(musicDuration) || 60;
         console.log(`[${nowIso()}] Generate complete song - 使用参数:`, {
-          musicStyle: finalMusicStyle,
+          musicMood: finalMusicMood,
           musicVoice: finalMusicVoice,
+          musicDuration: finalDuration,
           characterName,
           stepsCount: steps.length
         });
 
-        // 使用提示词工程生成完整歌曲歌词提示词
+        // 使用提示词工程生成完整歌曲歌词提示词（自由文本输出）
         const lyricsPrompt = prompts.getCompleteSongLyricsPrompt(
           steps,
           characterName,
-          finalMusicStyle,
-          finalMusicVoice
+          finalMusicMood,
+          finalMusicVoice,
+          finalDuration
         );
 
-        // 调用通义千问LLM（要求返回严格JSON：{ fixed_prefix, steps_lyrics[4] }）
+        // 调用通义千问LLM（返回纯文本歌词）
         const raw = await callQwenLLM([
           {
             role: 'user',
@@ -1695,38 +1835,19 @@ async function handler(req, res) {
           },
         ]);
 
-        let parsed;
-        try {
-          parsed = JSON.parse(String(raw).trim());
-        } catch (e) {
-          console.error(`[${nowIso()}] Generate complete song JSON parse error. Raw:`, raw);
-          throw new Error('完整歌曲歌词返回不是合法JSON，请检查prompt或模型输出：' + (e?.message || e));
+        // 清理LLM输出（去除可能的markdown代码块包裹）
+        let lyrics = String(raw || '').trim();
+        // 去除 ```...``` 包裹
+        const mdMatch = lyrics.match(/```(?:\w*)\s*([\s\S]*?)\s*```/);
+        if (mdMatch) lyrics = mdMatch[1].trim();
+
+        if (!lyrics) {
+          throw new Error('歌词生成结果为空');
         }
-
-        const fixedPrefix = String(parsed?.fixed_prefix || '').trim();
-        const stepsLyrics = parsed?.steps_lyrics;
-
-        if (!Array.isArray(stepsLyrics) || stepsLyrics.length !== 4) {
-          throw new Error('完整歌曲歌词JSON格式错误：steps_lyrics 必须为长度=4的数组');
-        }
-
-        const normalizedStepsLyrics = stepsLyrics.map((s, idx) => {
-          const line = String(s ?? '').trim();
-          if (!line) throw new Error(`第${idx + 1}步歌词为空`);
-          if (/[\r\n]/.test(line)) throw new Error(`第${idx + 1}步歌词包含换行符（不允许）`);
-          if (fixedPrefix && !line.startsWith(fixedPrefix)) {
-            throw new Error(`第${idx + 1}步歌词未以固定句头“${fixedPrefix}”开头`);
-          }
-          return line;
-        });
-
-        const fullLyrics = normalizedStepsLyrics.join('\n');
 
         return send(res, 200, {
           success: true,
-          fixed_prefix: fixedPrefix,
-          steps_lyrics: normalizedStepsLyrics,
-          full_lyrics: fullLyrics,
+          lyrics: lyrics,
           quota: quotaResult,
         });
       } catch (e) {
@@ -1921,7 +2042,7 @@ async function handler(req, res) {
       const auth = await requireAuth(req, res);
       if (!auth) return;
       const body = await readJson(req);
-      const { sessionId, decomposedData, stepContents, userGoal, learningFocus, musicStyle, musicVoice, pictureBookStyle, characterType } = body;
+      const { sessionId, decomposedData, stepContents, userGoal, learningFocus, musicSettings, musicVoice, pictureBookStyle, characterType } = body;
 
       if (!sessionId || !decomposedData || !stepContents) {
         return send(res, 400, { error: 'sessionId, decomposedData, and stepContents are required' });
@@ -1972,7 +2093,7 @@ async function handler(req, res) {
           userId: auth.user.id,
           userGoal,
           learningFocus,
-          musicStyle,
+          musicSettings: musicSettings || {},
           musicVoice,
           pictureBookStyle,
           characterType,
@@ -2306,6 +2427,9 @@ server.listen(PORT, () => {
   console.log(`Doubao VOLC_SK: ${VOLC_SK && VOLC_SK.length >= 10 ? `✓ Set (${maskKey(VOLC_SK)})` : '✗ Not set or invalid'}`);
   console.log(`Doubao submit action: ${DOUBAO_SUBMIT_ACTION}, model version: ${DOUBAO_MODEL_VERSION}`);
   console.log(`Doubao query actions: ${DOUBAO_QUERY_ACTIONS.join(', ')}`);
+  console.log(`Verbose logs: ${ENABLE_VERBOSE_LOGS ? 'ON' : 'OFF'} (headers: ${ENABLE_HEADER_LOGS ? 'ON' : 'OFF'})`);
+  console.log(`Upstream retry: max=${UPSTREAM_MAX_RETRIES}, base=${UPSTREAM_RETRY_BASE_MS}ms, maxDelay=${UPSTREAM_RETRY_MAX_DELAY_MS}ms`);
+  console.log(`Decompose queue: concurrency=${DECOMPOSE_MAX_CONCURRENCY}, maxQueue=${DECOMPOSE_MAX_QUEUE}`);
   console.log('========================================\n');
 });
 }

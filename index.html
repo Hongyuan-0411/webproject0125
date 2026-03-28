@@ -93,6 +93,7 @@
       gap: 6px;
     }
     label::before { content: '✨'; font-size: 14px; }
+    #instrumentsGroup label::before { content: ''; display: none; }
     
     /* 输入框：像胖乎乎的小气泡 */
     input, select, textarea { 
@@ -766,25 +767,92 @@
         <label>目标重点</label>
         <textarea id="learningFocus" placeholder="例如：让孩子学会认识时针和分针，理解时间的概念" rows="3"></textarea>
 
-        <label>音乐风格</label>
-        <select id="musicStyle">
+        <label>音乐风格（心情）</label>
+        <select id="musicMood">
+          <option value="活力四射">活力四射</option>
+          <option value="快乐">快乐</option>
+          <option value="感人">感人</option>
+          <option value="平静">平静</option>
+          <option value="抒情">抒情</option>
           <option value="欢快" selected>欢快</option>
-          <option value="温暖">温暖</option>
-          <option value="舒缓">舒缓</option>
-          <option value="童话">童话</option>
-          <option value="custom">自定义输入</option>
         </select>
-        <input id="musicStyleCustom" placeholder="请输入自定义音乐风格" style="display: none; margin-top: 6px;" />
+
+        <label>曲风</label>
+        <select id="musicGenre">
+          <option value="流行乐" selected>流行乐</option>
+          <option value="民谣流行乐">民谣流行乐</option>
+          <option value="中文流行乐">中文流行乐</option>
+          <option value="民谣">民谣</option>
+        </select>
+
+        <label>场景</label>
+        <select id="musicScene">
+          <option value="儿童" selected>儿童</option>
+          <option value="晴天">晴天</option>
+          <option value="阴天">阴天</option>
+          <option value="放松">放松</option>
+          <option value="风景">风景</option>
+          <option value="雨天">雨天</option>
+          <option value="早晨">早晨</option>
+          <option value="家庭时光">家庭时光</option>
+          <option value="宠物">宠物</option>
+        </select>
+
+        <label>语言</label>
+        <select id="musicLang">
+          <option value="普通话" selected>普通话</option>
+          <option value="纯器乐">纯器乐（无语言）</option>
+        </select>
+
+        <label>乐器（可多选）</label>
+        <div id="instrumentsGroup" style="display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 6px;">
+          <label style="display:inline-flex; margin:0; font-weight:normal; font-size:15px;"><input type="checkbox" name="instruments" value="原声钢琴" checked style="width:auto; margin-right:4px;"> 原声钢琴</label>
+          <label style="display:inline-flex; margin:0; font-weight:normal; font-size:15px;"><input type="checkbox" name="instruments" value="弦乐" style="width:auto; margin-right:4px;"> 弦乐</label>
+          <label style="display:inline-flex; margin:0; font-weight:normal; font-size:15px;"><input type="checkbox" name="instruments" value="原声吉他" style="width:auto; margin-right:4px;"> 原声吉他</label>
+          <label style="display:inline-flex; margin:0; font-weight:normal; font-size:15px;"><input type="checkbox" name="instruments" value="拍手声" style="width:auto; margin-right:4px;"> 拍手声</label>
+          <label style="display:inline-flex; margin:0; font-weight:normal; font-size:15px;"><input type="checkbox" name="instruments" value="钢片琴" style="width:auto; margin-right:4px;"> 钢片琴</label>
+        </div>
+
+        <label>音色</label>
+        <select id="musicTimbre">
+          <option value="温暖" selected>温暖</option>
+          <option value="明亮">明亮</option>
+          <option value="甜美">甜美</option>
+          <option value="可爱">可爱</option>
+          <option value="浑厚">浑厚</option>
+          <option value="细腻的">细腻的</option>
+        </select>
+
+        <label>调式</label>
+        <select id="musicKey">
+          <option value="大调" selected>大调</option>
+          <option value="小调">小调</option>
+        </select>
+
+        <label>拍子速度</label>
+        <select id="musicTempo">
+          <option value="很慢">很慢（60-80 BPM）</option>
+          <option value="慢">慢（80-100 BPM）</option>
+          <option value="中等" selected>中等（100-120 BPM）</option>
+          <option value="稍快">稍快（120-140 BPM）</option>
+          <option value="快">快（140-160 BPM）</option>
+        </select>
 
         <label>音乐声音</label>
         <select id="musicVoice">
           <option value="男生" selected>男生</option>
           <option value="女生">女生</option>
-          <option value="爸爸">爸爸</option>
-          <option value="妈妈">妈妈</option>
-          <option value="custom">自定义输入</option>
+          <option value="童声">童声</option>
         </select>
-        <input id="musicVoiceCustom" placeholder="请输入自定义声音类型" style="display: none; margin-top: 6px;" />
+
+        <label>时长</label>
+        <select id="musicDuration">
+          <option value="30">30秒</option>
+          <option value="45">45秒</option>
+          <option value="60" selected>1分钟</option>
+          <option value="90">1分半</option>
+          <option value="120">2分钟</option>
+        </select>
 
         <label>绘本风格</label>
         <select id="pictureBookStyle">
@@ -1036,8 +1104,10 @@
 
   function setAppEnabled(enabled) {
     const ids = [
-      'userGoal', 'learningFocus', 'musicStyle', 'musicStyleCustom',
-      'musicVoice', 'musicVoiceCustom', 'pictureBookStyle', 'pictureBookStyleCustom',
+      'userGoal', 'learningFocus',
+      'musicMood', 'musicGenre', 'musicScene', 'musicLang',
+      'musicTimbre', 'musicKey', 'musicTempo', 'musicVoice', 'musicDuration',
+      'pictureBookStyle', 'pictureBookStyleCustom',
       'characterType', 'characterTypeCustom', 'characterName',
       'btnDecompose', 'btnRegenerate', 'btnGenerateAll', 'btnHistory',
       'btnDeleteMusic'
@@ -1057,6 +1127,13 @@
         el.disabled = true;
       }
     });
+    // 处理乐器多选checkbox的disabled状态
+    const instrumentsGroup = $('instrumentsGroup');
+    if (instrumentsGroup) {
+      instrumentsGroup.querySelectorAll('input[name="instruments"]').forEach(cb => {
+        cb.disabled = !enabled;
+      });
+    }
   }
 
   async function refreshQuota() {
@@ -1240,22 +1317,6 @@
 
   // 处理自定义输入显示/隐藏
   function setupCustomInputs() {
-    // 音乐风格自定义
-    $('musicStyle').addEventListener('change', function() {
-      $('musicStyleCustom').style.display = this.value === 'custom' ? 'block' : 'none';
-      if (this.value !== 'custom') {
-        $('musicStyleCustom').value = '';
-      }
-    });
-
-    // 音乐声音自定义
-    $('musicVoice').addEventListener('change', function() {
-      $('musicVoiceCustom').style.display = this.value === 'custom' ? 'block' : 'none';
-      if (this.value !== 'custom') {
-        $('musicVoiceCustom').value = '';
-      }
-    });
-
     // 绘本风格自定义
     $('pictureBookStyle').addEventListener('change', function() {
       $('pictureBookStyleCustom').style.display = this.value === 'custom' ? 'block' : 'none';
@@ -1281,6 +1342,28 @@
       return customInput.value.trim();
     }
     return select.value;
+  }
+
+  // 读取乐器多选checkbox的选中值
+  function getSelectedInstruments() {
+    const boxes = document.querySelectorAll('#instrumentsGroup input[name="instruments"]:checked');
+    return Array.from(boxes).map(cb => cb.value);
+  }
+
+  // 收集所有音乐设置为一个对象
+  function getMusicSettings() {
+    return {
+      musicMood: $('musicMood').value,
+      musicGenre: $('musicGenre').value,
+      musicScene: $('musicScene').value,
+      musicLang: $('musicLang').value,
+      instruments: getSelectedInstruments(),
+      musicTimbre: $('musicTimbre').value,
+      musicKey: $('musicKey').value,
+      musicTempo: $('musicTempo').value,
+      musicVoice: $('musicVoice').value,
+      musicDuration: Number($('musicDuration').value),
+    };
   }
 
   // ===============
@@ -1504,8 +1587,8 @@
     }
     const userGoal = $('userGoal').value.trim();
     const learningFocus = $('learningFocus').value.trim();
-    const musicStyle = getActualValue('musicStyle', 'musicStyleCustom');
-    const musicVoice = getActualValue('musicVoice', 'musicVoiceCustom');
+    const musicMood = $('musicMood').value;
+    const musicVoice = $('musicVoice').value;
     const pictureBookStyle = getActualValue('pictureBookStyle', 'pictureBookStyleCustom');
     const characterType = getActualValue('characterType', 'characterTypeCustom');
     const decomposeStatusEl = $('decomposeStatus');
@@ -1540,7 +1623,7 @@
         body: JSON.stringify({
           userGoal,
           learningFocus,
-          musicStyle,
+          musicMood,
           musicVoice,
           pictureBookStyle,
           characterType,
@@ -1830,8 +1913,9 @@
     }
 
     if (lyricsEl) {
-      if (content.lyrics) {
-        const cleanedLyrics = cleanLyrics(content.lyrics);
+      if (content.lyrics || content.lyricsLabel) {
+        const displayText = content.lyricsLabel || content.lyrics;
+        const cleanedLyrics = cleanLyrics(displayText);
         lyricsEl.textContent = cleanedLyrics;
         lyricsEl.style.display = 'block'; 
       } else if (content.lyricsError) {
@@ -2038,8 +2122,9 @@
 
     try {
       const characterName = $('characterName').value.trim() || decomposedData.character_name || '乐乐';
-      const musicStyle = getActualValue('musicStyle', 'musicStyleCustom');
-      const musicVoice = getActualValue('musicVoice', 'musicVoiceCustom');
+      const musicMood = $('musicMood').value;
+      const musicVoice = $('musicVoice').value;
+      const musicSettings = getMusicSettings();
       const pictureBookStyle = getActualValue('pictureBookStyle', 'pictureBookStyleCustom');
       const characterType = getActualValue('characterType', 'characterTypeCustom');
       const characterDescription = decomposedData.character_description || '';
@@ -2056,7 +2141,7 @@
       const lyricsResp = await fetch('/api/generate-complete-song', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ steps: decomposedData.steps, characterName, musicStyle, musicVoice }),
+        body: JSON.stringify({ steps: decomposedData.steps, characterName, musicMood, musicVoice, musicDuration: musicSettings.musicDuration }),
       });
 
       // 检查 401 并给出明确提示
@@ -2077,10 +2162,9 @@
         $('quotaInfo').textContent = `今日剩余：${q.remaining ?? '-'} / ${q.limit ?? '-'}（重置：${q.resetAt ? new Date(q.resetAt).toLocaleString('zh-CN') : '-'}）`;
       }
 
-      const stepsLyrics = Array.isArray(lyricsData.steps_lyrics) ? lyricsData.steps_lyrics : null;
-      const fullLyrics = typeof lyricsData.full_lyrics === 'string' ? lyricsData.full_lyrics : '';
-      if (!stepsLyrics || stepsLyrics.length !== 4 || !fullLyrics) {
-        throw new Error('完整歌曲歌词返回格式错误：需要 steps_lyrics(长度4) 和 full_lyrics');
+      const fullLyrics = typeof lyricsData.lyrics === 'string' ? lyricsData.lyrics : '';
+      if (!fullLyrics) {
+        throw new Error('完整歌曲歌词返回为空');
       }
 
       // ---- 生成图片 ----
@@ -2114,15 +2198,10 @@
       // ---- 生成音乐 ----
       statusEl.textContent = '正在生成完整歌曲音乐...';
 
-      const joined = stepsLyrics.join('\n');
-      if (joined !== fullLyrics) {
-        throw new Error('歌词一致性校验失败：full_lyrics 与 steps_lyrics 拼接结果不一致');
-      }
-
       let audioUrl = null;
       let audioError = null;
       try {
-        audioUrl = await generateCompleteSongMusic(fullLyrics, decomposedData.steps[0].step_name, musicStyle, musicVoice);
+        audioUrl = await generateCompleteSongMusic(fullLyrics, decomposedData.steps[0].step_name, musicSettings);
       } catch (e) {
         audioError = e?.message || e;
         console.warn('音乐生成失败（非致命）：', audioError);
@@ -2132,7 +2211,8 @@
 
       for (let i = 0; i < 4; i++) {
         stepContents[i] = {
-          lyrics: stepsLyrics[i],
+          lyrics: fullLyrics,
+          lyricsLabel: decomposedData.steps[i].step_name,
           imageUrl: croppedImages[i],
           audioUrl: audioUrl,
           audioDeleted: false,
@@ -2222,28 +2302,45 @@
     });
   }
 
-  async function generateCompleteSongMusic(lyrics, title, musicStyle, musicVoice) {
-    const cleanLyrics = cleanLyricsForMusic(lyrics);
-    musicStyle = musicStyle || '欢快';
-    musicVoice = musicVoice || '男生';
+  async function generateCompleteSongMusic(lyrics, title, musicSettings) {
+    const {
+      musicMood = '欢快', musicGenre = '流行乐', musicScene = '儿童',
+      musicLang = '普通话', instruments = [], musicTimbre = '温暖',
+      musicKey = '大调', musicTempo = '中等', musicVoice = '男生',
+      musicDuration = 60
+    } = musicSettings || {};
 
-    const styleMap = {
-      '欢快':    { genre: 'Pop',           mood: 'Happy' },
-      '舒缓钢琴': { genre: 'Easy Listening', mood: 'Calm/Relaxing' },
-      '活泼儿歌': { genre: 'Pop',            mood: 'Dynamic/Energetic' },
-      '节奏感强': { genre: 'Pop Rock',       mood: 'Dynamic/Energetic' },
-      '温馨童谣': { genre: 'Folk',           mood: 'Warm/Kind' },
-    };
-    const styleParams = styleMap[musicStyle] || { genre: 'Pop', mood: 'Happy' };
-    const gender = musicVoice.includes('女') ? 'Female' : musicVoice.includes('男') ? 'Male' : '';
+    // Doubao API 参数映射表（基于官方V4.3文档）
+    const genreMap = { '流行乐':'Pop','民谣流行乐':'Folk Pop','中文流行乐':'Chinese Pop','民谣':'Folk' };
+    const moodMap = { '活力四射':'Dynamic/Energetic','快乐':'Happy','感人':'Warm/Kind','平静':'Calm/Relaxing','抒情':'Lyrical/Ballad','欢快':'Brisk/Carefree' };
+    const langMap = { '普通话':'Chinese','纯器乐':'Instrumental/Non-vocal' };
+    const genderMap = { '男生':'Male','女生':'Female','童声':'' };
+    const timbreMap = { '温暖':'Warm','明亮':'Bright','甜美':'Sweet_AUDIO_TIMBRE','可爱':'Cute_AUDIO_TIMBRE','浑厚':'Loud and sonorous','细腻的':'Delicate' };
+    const kmodeMap = { '大调':'Major','小调':'Minor' };
+    const tempoMap = { '很慢':'Largo','慢':'Adagio','中等':'Moderato','稍快':'Allegro','快':'Vivace' };
+    const sceneMap = { '晴天':'Sunny Day','阴天':'Cloudy Day','放松':'Relaxation','儿童':'Children','风景':'Landscape/Scenery','雨天':'Rainy Day','早晨':'Morning','家庭时光':'Family','宠物':'Pet/Animals' };
+    const instrumentMap = { '原声钢琴':'Acoustic_Piano','弦乐':'Strings','原声吉他':'Acoustic_Guitar','拍手声':'Clap','钢片琴':'Glockenspiel' };
+
+    const isInstrumental = (musicLang === '纯器乐');
+    const cleanLyrics = cleanLyricsForMusic(isInstrumental ? '' : lyrics);
 
     const payload = {
       lyrics: cleanLyrics,
-      genre: styleParams.genre,
-      mood: styleParams.mood,
-      duration: 60,
+      genre: genreMap[musicGenre] || 'Pop',
+      mood: moodMap[musicMood] || 'Happy',
+      duration: Number(musicDuration) || 60,
+      lang: langMap[musicLang] || 'Chinese',
+      timbre: timbreMap[musicTimbre] || '',
+      kmode: kmodeMap[musicKey] || '',
+      tempo: tempoMap[musicTempo] || '',
+      scene: sceneMap[musicScene] || '',
     };
-    if (gender) payload.gender = gender;
+    // 乐器多选，用逗号拼接
+    if (instruments.length > 0) {
+      payload.instrument = instruments.map(i => instrumentMap[i] || i).join(',');
+    }
+    const gender = genderMap[musicVoice];
+    if (gender && !isInstrumental) payload.gender = gender;
 
     const submitResp = await fetch('/api/music-submit', {
       method: 'POST',
@@ -2654,16 +2751,14 @@
     try {
       const userGoal = $('userGoal').value.trim();
       const learningFocus = $('learningFocus').value.trim();
-      const musicStyle = getActualValue('musicStyle', 'musicStyleCustom');
-      const musicVoice = getActualValue('musicVoice', 'musicVoiceCustom');
+      const musicSettings = getMusicSettings();
       const pictureBookStyle = getActualValue('pictureBookStyle', 'pictureBookStyleCustom');
       const characterType = getActualValue('characterType', 'characterTypeCustom');
 
       const enhancedStepContents = stepContents.map((content, index) => ({
         ...content,
         ...(index === 0 ? {
-          steps_lyrics: stepContents.map(c => c.lyrics),
-          full_lyrics: stepContents.map(c => c.lyrics).join('\n')
+          full_lyrics: content.lyrics
         } : {})
       }));
 
@@ -2676,8 +2771,8 @@
           stepContents: enhancedStepContents,
           userGoal: userGoal,
           learningFocus: learningFocus,
-          musicStyle: musicStyle,
-          musicVoice: musicVoice,
+          musicSettings: musicSettings,
+          musicVoice: musicSettings.musicVoice,
           pictureBookStyle: pictureBookStyle,
           characterType: characterType,
         }),
@@ -2848,6 +2943,7 @@
         const stepsLyrics = firstItem.steps_lyrics.map(s => String(s ?? ''));
         stepContents = historyData.stepContents.map((item, index) => ({
           lyrics: stepsLyrics[index] || '',
+          lyricsLabel: decomposedData?.steps?.[index]?.step_name || '',
           imageUrl: item.imageUrl,
           audioUrl: item.audioUrl,
           audioDeleted: !!item.audioDeleted,
@@ -2871,8 +2967,9 @@
           }
           return {
             lyrics: lyricsContent,
-            imageUrl: item.imageUrl, 
-            audioUrl: item.audioUrl, 
+            lyricsLabel: decomposedData?.steps?.[index]?.step_name || '',
+            imageUrl: item.imageUrl,
+            audioUrl: item.audioUrl,
             audioDeleted: !!item.audioDeleted,
             lyricsUrl: item.lyricsUrl,
             lyricsError: lyricsErr,
@@ -2884,8 +2981,29 @@
 
       if (historyData.userGoal) $('userGoal').value = historyData.userGoal;
       if (historyData.learningFocus) $('learningFocus').value = historyData.learningFocus;
-      if (historyData.musicStyle) $('musicStyle').value = historyData.musicStyle;
-      if (historyData.musicVoice) $('musicVoice').value = historyData.musicVoice;
+
+      // 恢复音乐设置（兼容新旧格式）
+      const ms = historyData.musicSettings || {};
+      if (ms.musicMood) $('musicMood').value = ms.musicMood;
+      if (ms.musicGenre) $('musicGenre').value = ms.musicGenre;
+      if (ms.musicScene) $('musicScene').value = ms.musicScene;
+      if (ms.musicLang) $('musicLang').value = ms.musicLang;
+      if (Array.isArray(ms.instruments)) {
+        document.querySelectorAll('#instrumentsGroup input[name="instruments"]').forEach(cb => {
+          cb.checked = ms.instruments.includes(cb.value);
+        });
+      }
+      if (ms.musicTimbre) $('musicTimbre').value = ms.musicTimbre;
+      if (ms.musicKey) $('musicKey').value = ms.musicKey;
+      if (ms.musicTempo) $('musicTempo').value = ms.musicTempo;
+      if (ms.musicDuration) $('musicDuration').value = String(ms.musicDuration);
+      // 音乐声音：兼容旧格式（爸爸→男生，妈妈→女生）
+      const voiceVal = ms.musicVoice || historyData.musicVoice;
+      if (voiceVal) {
+        const voiceCompat = { '爸爸':'男生','妈妈':'女生','男生':'男生','女生':'女生','童声':'童声' };
+        $('musicVoice').value = voiceCompat[voiceVal] || '男生';
+      }
+
       if (historyData.pictureBookStyle) $('pictureBookStyle').value = historyData.pictureBookStyle;
       if (historyData.characterType) $('characterType').value = historyData.characterType;
 
