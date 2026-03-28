@@ -1504,7 +1504,9 @@
 
     if (!globalAudio) return;
     if (globalAudio.paused) {
-      globalAudio.play().catch(() => {});
+      globalAudio.play().catch((err) => {
+        console.warn('globalAudio play failed:', err);
+      });
     } else {
       globalAudio.pause();
     }
@@ -1561,10 +1563,18 @@
 
       globalAudioSrc = url;
       globalAudio.src = url;
+      try {
+        globalAudio.load();
+      } catch (_) {}
+      updateGlobalAudioUI();
 
       if (wasPlaying) {
-        globalAudio.play().catch(() => {});
+        globalAudio.play().catch((err) => {
+          console.warn('globalAudio resume after src change failed:', err);
+        });
       }
+    } else {
+      updateGlobalAudioUI();
     }
   }
 
@@ -2207,8 +2217,6 @@
         console.warn('音乐生成失败（非致命）：', audioError);
       }
 
-      if (audioUrl) ensureGlobalAudioSource(audioUrl);
-
       for (let i = 0; i < 4; i++) {
         stepContents[i] = {
           lyrics: fullLyrics,
@@ -2222,6 +2230,12 @@
 
         if (currentStepIndex === i) displayStepContent(i);
         try { await saveStepContent(i); } catch (e) { }
+      }
+
+      if (audioUrl) {
+        ensureGlobalAudioSource(audioUrl);
+        initGlobalAudioIfNeeded();
+        updateGlobalAudioUI();
       }
 
       statusEl.className = 'ok';
