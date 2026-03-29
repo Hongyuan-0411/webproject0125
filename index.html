@@ -1931,11 +1931,10 @@
     }
 
     if (lyricsEl) {
-      if (content.lyrics || content.lyricsLabel) {
-        const displayText = content.lyricsLabel || content.lyrics;
-        const cleanedLyrics = cleanLyrics(displayText);
+      if (content.lyrics) {
+        const cleanedLyrics = cleanLyrics(content.lyrics);
         lyricsEl.textContent = cleanedLyrics;
-        lyricsEl.style.display = 'block'; 
+        lyricsEl.style.display = 'block';
       } else if (content.lyricsError) {
         lyricsEl.textContent = `歌词生成失败：${content.lyricsError}`;
         lyricsEl.style.color = 'var(--brand-shadow)';
@@ -2230,7 +2229,6 @@
         const stepLyricsItem = stepsLyrics[i] || {};
         stepContents[i] = {
           lyrics: stepLyricsItem.lyrics || '',
-          lyricsLabel: stepLyricsItem.lyrics || decomposedData.steps[i].step_name,
           imageUrl: croppedImages[i],
           audioUrl: audioUrl,
           audioDeleted: false,
@@ -2976,7 +2974,6 @@
         const stepsLyrics = firstItem.steps_lyrics.map(s => String(s ?? ''));
         stepContents = historyData.stepContents.map((item, index) => ({
           lyrics: stepsLyrics[index] || '',
-          lyricsLabel: decomposedData?.steps?.[index]?.step_name || '',
           imageUrl: item.imageUrl,
           audioUrl: item.audioUrl,
           audioDeleted: !!item.audioDeleted,
@@ -3000,7 +2997,6 @@
           }
           return {
             lyrics: lyricsContent,
-            lyricsLabel: decomposedData?.steps?.[index]?.step_name || '',
             imageUrl: item.imageUrl,
             audioUrl: item.audioUrl,
             audioDeleted: !!item.audioDeleted,
