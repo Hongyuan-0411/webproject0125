@@ -2238,6 +2238,9 @@
         updateGlobalAudioUI();
       }
 
+      // 重新渲染步骤内容，使 freshly generated 路径与历史导入路径一致
+      renderStepContents();
+
       statusEl.className = 'ok';
       statusEl.textContent = '✅ 所有内容生成完成！已生成一首完整歌曲和4个小图';
       decomposeStatusEl.className = 'ok';
