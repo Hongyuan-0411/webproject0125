@@ -1186,6 +1186,8 @@ async function callQwenLLM(messages, model = 'qwen-plus') {
 }
 
 async function generateImageDashScope(prompt, size, negativePrompt, promptExtend, watermark) {
+  // Legacy Qwen/DashScope image generation helper
+  // 保留供参考/回滚，不再被当前路由使用
   // 阿里云百炼 Qwen-image 同步接口
   const DASHSCOPE_API_URL = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
   const normalizedSize = normalizeSize(size);
@@ -1248,6 +1250,61 @@ async function generateImageDashScope(prompt, size, negativePrompt, promptExtend
   }
 
   return json;
+}
+
+async function generateImageDoubaoSeedream(prompt, size, negativePrompt, promptExtend, watermark) {
+  if (!VOLC_AK || !VOLC_SK) {
+    throw new Error('VOLC_AK / VOLC_SK not configured');
+  }
+
+  const normalizedSize = normalizeSize(size);
+  const [width, height] = normalizedSize.split('*').map((v) => Number(v));
+  const payload = {
+    Prompt: String(prompt || '').trim(),
+    Model: 'Doubao-Seedream-5.0-lite',
+    Width: width,
+    Height: height,
+  };
+
+  if (negativePrompt && String(negativePrompt).trim()) {
+    payload.NegativePrompt = String(negativePrompt).trim();
+  }
+  if (promptExtend !== undefined) {
+    payload.PromptExtend = !!promptExtend;
+  }
+  if (watermark !== undefined) {
+    payload.Watermark = !!watermark;
+  }
+
+  console.log(`[${nowIso()}] >>> Doubao (Seedream-5.0-lite) image generation request`);
+  logVerbose(`[${nowIso()}] >>> request body:`, JSON.stringify(payload, null, 2));
+
+  const result = await callDoubaoMusicApi('GenImage', payload);
+  if (!result.ok) {
+    throw new Error(`Doubao image API error: ${JSON.stringify(result.json)}`);
+  }
+  if (!isDoubaoBizSuccess(result.json)) {
+    throw new Error(`Doubao image business error: ${JSON.stringify(result.json)}`);
+  }
+
+  const requestId = String(
+    result.json?.ResponseMetadata?.RequestId ||
+    result.json?.request_id ||
+    result.json?.RequestId ||
+    ''
+  ).trim();
+
+  const imageUrl = (
+    deepFindStringByKey(result.json, ['image_url', 'imageUrl', 'url', 'ImageUrl', 'ImageURL']) ||
+    deepFindAudioUrl(result.json)
+  );
+
+  return {
+    request_id: requestId,
+    image_url: imageUrl,
+    usage: result.json?.usage || result.json?.Usage || null,
+    raw: result.json,
+  };
 }
 
 // 注意：阿里云百炼 Qwen-image 使用同步接口，不需要 fetchImageTask 函数
@@ -1860,8 +1917,8 @@ async function handler(req, res) {
     if (req.method === 'POST' && url.pathname === '/api/generate-combined-image') {
       const auth = await requireAuth(req, res);
       if (!auth) return;
-      if (!DASHSCOPE_API_KEY) {
-        return send(res, 500, { error: 'DASHSCOPE_API_KEY not configured' });
+      if (!VOLC_AK || !VOLC_SK) {
+        return send(res, 500, { error: 'VOLC_AK / VOLC_SK not configured' });
       }
 
       const body = await readJson(req);
@@ -1894,48 +1951,31 @@ async function handler(req, res) {
           finalPictureBookStyle
         );
 
-        // 调用图片生成API
-        const response = await generateImageDashScope(
+        // Legacy Qwen/DashScope image generation path (保留供参考/回滚，不再使用)
+        // const response = await generateImageDashScope(
+        //   imagePrompt.trim(),
+        //   '1664*928',
+        //   null,
+        //   true,
+        //   false
+        // );
+
+        // 改用 Doubao-Seedream-5.0-lite
+        const response = await generateImageDoubaoSeedream(
           imagePrompt.trim(),
-          '1664*928', // 固定尺寸
-          null, // 使用默认负面提示词
-          true, // prompt_extend
-          false // watermark
+          '1664*928',
+          null,
+          true,
+          false
         );
 
-        // 解析响应格式
-        const output = response.output;
-        if (!output) {
-          return send(res, 502, { error: 'No output in response', response });
+        if (!response?.image_url) {
+          return send(res, 502, { error: 'No image URL in content', response: response?.raw || response });
         }
 
-        const choices = output.choices;
-        if (!choices || !Array.isArray(choices) || choices.length === 0) {
-          return send(res, 502, { error: 'No choices in output', response });
-        }
-
-        const firstChoice = choices[0];
-        const message = firstChoice?.message;
-        if (!message) {
-          return send(res, 502, { error: 'No message in choice', response });
-        }
-
-        const content = message.content;
-        if (!content || !Array.isArray(content) || content.length === 0) {
-          return send(res, 502, { error: 'No content in message', response });
-        }
-
-        const firstContent = content[0];
-        const imageUrl = firstContent?.image;
-        
-        if (!imageUrl) {
-          return send(res, 502, { error: 'No image URL in content', response });
-        }
-
-        // 成功返回图片 URL
         return send(res, 200, {
           request_id: response.request_id,
-          image_url: imageUrl,
+          image_url: response.image_url,
           usage: response.usage,
         });
       } catch (e) {
@@ -2274,14 +2314,14 @@ async function handler(req, res) {
     if (req.method === 'POST' && url.pathname === '/api/generate-image') {
       const auth = await requireAuth(req, res);
       if (!auth) return;
-      if (!DASHSCOPE_API_KEY) {
-        return send(res, 500, { error: 'DASHSCOPE_API_KEY not configured' });
+      if (!VOLC_AK || !VOLC_SK) {
+        return send(res, 500, { error: 'VOLC_AK / VOLC_SK not configured' });
       }
 
       const body = await readJson(req);
-      const { 
-        prompt, 
-        size = '1664*928', 
+      const {
+        prompt,
+        size = '1664*928',
         negative_prompt = null,
         prompt_extend = true,
         watermark = false
@@ -2297,48 +2337,31 @@ async function handler(req, res) {
       }
 
       try {
-        // 调用阿里云百炼 Qwen-image 同步接口
-        const response = await generateImageDashScope(
-          prompt.trim(), 
-          size, 
+        // Legacy Qwen/DashScope image generation path (保留供参考/回滚，不再使用)
+        // const response = await generateImageDashScope(
+        //   prompt.trim(),
+        //   size,
+        //   effectiveNegativePrompt,
+        //   prompt_extend,
+        //   watermark
+        // );
+
+        // 改用 Doubao-Seedream-5.0-lite
+        const response = await generateImageDoubaoSeedream(
+          prompt.trim(),
+          size,
           effectiveNegativePrompt,
           prompt_extend,
           watermark
         );
 
-        // 解析响应格式：output.choices[0].message.content[0].image
-        const output = response.output;
-        if (!output) {
-          return send(res, 502, { error: 'No output in response', response });
+        if (!response?.image_url) {
+          return send(res, 502, { error: 'No image URL in content', response: response?.raw || response });
         }
 
-        const choices = output.choices;
-        if (!choices || !Array.isArray(choices) || choices.length === 0) {
-          return send(res, 502, { error: 'No choices in output', response });
-        }
-
-        const firstChoice = choices[0];
-        const message = firstChoice?.message;
-        if (!message) {
-          return send(res, 502, { error: 'No message in choice', response });
-        }
-
-        const content = message.content;
-        if (!content || !Array.isArray(content) || content.length === 0) {
-          return send(res, 502, { error: 'No content in message', response });
-        }
-
-        const firstContent = content[0];
-        const imageUrl = firstContent?.image;
-        
-        if (!imageUrl) {
-          return send(res, 502, { error: 'No image URL in content', response });
-        }
-
-        // 成功返回图片 URL
         return send(res, 200, {
           request_id: response.request_id,
-          image_url: imageUrl,
+          image_url: response.image_url,
           usage: response.usage,
         });
       } catch (e) {
