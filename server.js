@@ -146,14 +146,17 @@ const USE_X_API_KEY_HEADER = false; // 设置为 true 以使用 X-API-Key header
 // 注意：不再从 api.env 文件读取，只使用环境变量或硬编码默认值
 let API_KEY = process.env.SUNO_API_KEY || process.env.API_KEY || DEFAULT_SUNO_API_KEY;
 let DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY || DEFAULT_DASHSCOPE_API_KEY;
+let ARK_API_KEY = process.env.ARK_API_KEY || '';
 
 // 清理 API keys（去除可能的空格、换行、引号等）
 API_KEY = String(API_KEY).trim().replace(/^["']|["']$/g, '');
 DASHSCOPE_API_KEY = String(DASHSCOPE_API_KEY).trim().replace(/^["']|["']$/g, '');
+ARK_API_KEY = String(ARK_API_KEY).trim().replace(/^["']|["']$/g, '');
 
 // 调试：显示 API key 来源
 console.log(`[DEBUG] API_KEY source: ${process.env.SUNO_API_KEY || process.env.API_KEY ? 'env' : 'default'}`);
 console.log(`[DEBUG] DASHSCOPE_API_KEY source: ${process.env.DASHSCOPE_API_KEY ? 'env' : 'default'}`);
+console.log(`[DEBUG] ARK_API_KEY source: ${process.env.ARK_API_KEY ? 'env' : 'missing'}`);
 
 // 调试输出（不显示完整 key，只显示前几位和后几位）
 function maskKey(key) {
@@ -1253,57 +1256,71 @@ async function generateImageDashScope(prompt, size, negativePrompt, promptExtend
 }
 
 async function generateImageDoubaoSeedream(prompt, size, negativePrompt, promptExtend, watermark) {
-  if (!VOLC_AK || !VOLC_SK) {
-    throw new Error('VOLC_AK / VOLC_SK not configured');
+  // ARK Seedream 实验路径（当前不启用，保留供后续继续实验/对照，不删除）
+  if (!ARK_API_KEY) {
+    throw new Error('ARK_API_KEY not configured');
   }
 
   const normalizedSize = normalizeSize(size);
-  const [width, height] = normalizedSize.split('*').map((v) => Number(v));
   const payload = {
-    Prompt: String(prompt || '').trim(),
-    Model: 'Doubao-Seedream-5.0-lite',
-    Width: width,
-    Height: height,
+    model: 'doubao-seedream-5-0-260128',
+    prompt: String(prompt || '').trim(),
+    size: normalizedSize,
+    output_format: 'png',
+    response_format: 'url',
+    watermark: watermark !== undefined ? !!watermark : false,
   };
 
-  if (negativePrompt && String(negativePrompt).trim()) {
-    payload.NegativePrompt = String(negativePrompt).trim();
-  }
+  // Seedream 5.0 lite 官方 ARK 接口不使用 Qwen 的 negative_prompt / prompt_extend 字段
+  // 保留参数签名只是为了兼容当前调用点
   if (promptExtend !== undefined) {
-    payload.PromptExtend = !!promptExtend;
-  }
-  if (watermark !== undefined) {
-    payload.Watermark = !!watermark;
+    payload.optimize_prompt_options = { mode: 'standard' };
   }
 
-  console.log(`[${nowIso()}] >>> Doubao (Seedream-5.0-lite) image generation request`);
+  console.log(`[${nowIso()}] >>> ARK (Seedream-5.0-lite) image generation request`);
   logVerbose(`[${nowIso()}] >>> request body:`, JSON.stringify(payload, null, 2));
 
-  const result = await callDoubaoMusicApi('GenImage', payload);
-  if (!result.ok) {
-    throw new Error(`Doubao image API error: ${JSON.stringify(result.json)}`);
+  const r = await fetchWithRetry('https://ark.cn-beijing.volces.com/api/v3/images/generations', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${ARK_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  }, {
+    label: 'ark-seedream-image',
+  });
+
+  const text = await r.text();
+  console.log(`[${nowIso()}] <<< ARK response status: ${r.status} ${r.statusText}`);
+  logVerbose(`[${nowIso()}] <<< ARK response body:`, text);
+
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`ARK response parse error: ${e.message}`);
   }
-  if (!isDoubaoBizSuccess(result.json)) {
-    throw new Error(`Doubao image business error: ${JSON.stringify(result.json)}`);
+
+  if (!r.ok) {
+    throw new Error(`Doubao image API error: ${JSON.stringify(json)}`);
   }
 
   const requestId = String(
-    result.json?.ResponseMetadata?.RequestId ||
-    result.json?.request_id ||
-    result.json?.RequestId ||
+    json?.request_id ||
+    json?.RequestId ||
+    json?.ResponseMetadata?.RequestId ||
     ''
   ).trim();
 
-  const imageUrl = (
-    deepFindStringByKey(result.json, ['image_url', 'imageUrl', 'url', 'ImageUrl', 'ImageURL']) ||
-    deepFindAudioUrl(result.json)
-  );
+  const firstData = Array.isArray(json?.data) ? json.data[0] : null;
+  const imageUrl = String(firstData?.url || '').trim();
 
   return {
     request_id: requestId,
     image_url: imageUrl,
-    usage: result.json?.usage || result.json?.Usage || null,
-    raw: result.json,
+    usage: json?.usage || null,
+    raw: json,
   };
 }
 
@@ -1917,8 +1934,8 @@ async function handler(req, res) {
     if (req.method === 'POST' && url.pathname === '/api/generate-combined-image') {
       const auth = await requireAuth(req, res);
       if (!auth) return;
-      if (!VOLC_AK || !VOLC_SK) {
-        return send(res, 500, { error: 'VOLC_AK / VOLC_SK not configured' });
+      if (!DASHSCOPE_API_KEY) {
+        return send(res, 500, { error: 'DASHSCOPE_API_KEY not configured' });
       }
 
       const body = await readJson(req);
@@ -1951,17 +1968,8 @@ async function handler(req, res) {
           finalPictureBookStyle
         );
 
-        // Legacy Qwen/DashScope image generation path (保留供参考/回滚，不再使用)
-        // const response = await generateImageDashScope(
-        //   imagePrompt.trim(),
-        //   '1664*928',
-        //   null,
-        //   true,
-        //   false
-        // );
-
-        // 改用 Doubao-Seedream-5.0-lite
-        const response = await generateImageDoubaoSeedream(
+        // 当前恢复使用 Qwen/DashScope 图像生成路径
+        const response = await generateImageDashScope(
           imagePrompt.trim(),
           '1664*928',
           null,
@@ -1969,13 +1977,47 @@ async function handler(req, res) {
           false
         );
 
-        if (!response?.image_url) {
-          return send(res, 502, { error: 'No image URL in content', response: response?.raw || response });
+        // ARK Seedream 路径（保留供后续继续实验，不删除）
+        // const response = await generateImageDoubaoSeedream(
+        //   imagePrompt.trim(),
+        //   '1664*928',
+        //   null,
+        //   true,
+        //   false
+        // );
+
+        // 解析响应格式
+        const output = response.output;
+        if (!output) {
+          return send(res, 502, { error: 'No output in response', response });
+        }
+
+        const choices = output.choices;
+        if (!choices || !Array.isArray(choices) || choices.length === 0) {
+          return send(res, 502, { error: 'No choices in output', response });
+        }
+
+        const firstChoice = choices[0];
+        const message = firstChoice?.message;
+        if (!message) {
+          return send(res, 502, { error: 'No message in choice', response });
+        }
+
+        const content = message.content;
+        if (!content || !Array.isArray(content) || content.length === 0) {
+          return send(res, 502, { error: 'No content in message', response });
+        }
+
+        const firstContent = content[0];
+        const imageUrl = firstContent?.image;
+
+        if (!imageUrl) {
+          return send(res, 502, { error: 'No image URL in content', response });
         }
 
         return send(res, 200, {
           request_id: response.request_id,
-          image_url: response.image_url,
+          image_url: imageUrl,
           usage: response.usage,
         });
       } catch (e) {
@@ -2310,12 +2352,12 @@ async function handler(req, res) {
     // NOTE: /api/asset 本地文件读取接口已弃用。
     // 资源现在通过 Vercel Blob 提供稳定公开 URL；历史导入也直接使用历史数据中的 URL。
 
-    // API: 图片生成 (DashScope qwen-image)
+    // API: 图片生成 (当前恢复为 DashScope qwen-image-max)
     if (req.method === 'POST' && url.pathname === '/api/generate-image') {
       const auth = await requireAuth(req, res);
       if (!auth) return;
-      if (!VOLC_AK || !VOLC_SK) {
-        return send(res, 500, { error: 'VOLC_AK / VOLC_SK not configured' });
+      if (!DASHSCOPE_API_KEY) {
+        return send(res, 500, { error: 'DASHSCOPE_API_KEY not configured' });
       }
 
       const body = await readJson(req);
@@ -2337,17 +2379,8 @@ async function handler(req, res) {
       }
 
       try {
-        // Legacy Qwen/DashScope image generation path (保留供参考/回滚，不再使用)
-        // const response = await generateImageDashScope(
-        //   prompt.trim(),
-        //   size,
-        //   effectiveNegativePrompt,
-        //   prompt_extend,
-        //   watermark
-        // );
-
-        // 改用 Doubao-Seedream-5.0-lite
-        const response = await generateImageDoubaoSeedream(
+        // 当前恢复使用 Qwen/DashScope 图像生成路径
+        const response = await generateImageDashScope(
           prompt.trim(),
           size,
           effectiveNegativePrompt,
@@ -2355,13 +2388,47 @@ async function handler(req, res) {
           watermark
         );
 
-        if (!response?.image_url) {
-          return send(res, 502, { error: 'No image URL in content', response: response?.raw || response });
+        // ARK Seedream 路径（保留供后续继续实验，不删除）
+        // const response = await generateImageDoubaoSeedream(
+        //   prompt.trim(),
+        //   size,
+        //   effectiveNegativePrompt,
+        //   prompt_extend,
+        //   watermark
+        // );
+
+        // 解析响应格式：output.choices[0].message.content[0].image
+        const output = response.output;
+        if (!output) {
+          return send(res, 502, { error: 'No output in response', response });
+        }
+
+        const choices = output.choices;
+        if (!choices || !Array.isArray(choices) || choices.length === 0) {
+          return send(res, 502, { error: 'No choices in output', response });
+        }
+
+        const firstChoice = choices[0];
+        const message = firstChoice?.message;
+        if (!message) {
+          return send(res, 502, { error: 'No message in choice', response });
+        }
+
+        const content = message.content;
+        if (!content || !Array.isArray(content) || content.length === 0) {
+          return send(res, 502, { error: 'No content in message', response });
+        }
+
+        const firstContent = content[0];
+        const imageUrl = firstContent?.image;
+
+        if (!imageUrl) {
+          return send(res, 502, { error: 'No image URL in content', response });
         }
 
         return send(res, 200, {
           request_id: response.request_id,
-          image_url: response.image_url,
+          image_url: imageUrl,
           usage: response.usage,
         });
       } catch (e) {
