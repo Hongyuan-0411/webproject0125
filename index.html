@@ -1498,11 +1498,19 @@
   }
 
   function toggleGlobalPlayPause() {
+    const currentAudioUrl = stepContents?.[currentStepIndex]?.audioUrl || '';
+    if (!globalAudioSrc && currentAudioUrl) {
+      ensureGlobalAudioSource(currentAudioUrl);
+    }
     if (!globalAudioSrc) return;
     initGlobalAudioIfNeeded();
     bindGlobalProgressBarIfNeeded();
+    updateGlobalAudioUI();
 
     if (!globalAudio) return;
+    if ((!globalAudio.currentSrc || globalAudio.currentSrc !== globalAudioSrc) && globalAudioSrc) {
+      ensureGlobalAudioSource(globalAudioSrc);
+    }
     if (globalAudio.paused) {
       globalAudio.play().catch((err) => {
         console.warn('globalAudio play failed:', err);
@@ -2232,21 +2240,22 @@
         try { await saveStepContent(i); } catch (e) { }
       }
 
+      // 重新渲染步骤内容，使 freshly generated 路径与历史导入路径一致
+      renderStepContents();
+      showCurrentStep();
+
       if (audioUrl) {
         ensureGlobalAudioSource(audioUrl);
         initGlobalAudioIfNeeded();
+        bindGlobalProgressBarIfNeeded();
         updateGlobalAudioUI();
       }
-
-      // 重新渲染步骤内容，使 freshly generated 路径与历史导入路径一致
-      renderStepContents();
 
       statusEl.className = 'ok';
       statusEl.textContent = '✅ 所有内容生成完成！已生成一首完整歌曲和4个小图';
       decomposeStatusEl.className = 'ok';
       decomposeStatusEl.textContent = '✅ 分解并生成完成！';
 
-      showCurrentStep();
       try { await saveHistory(); } catch (e) { }
       await refreshQuota();
     } catch (e) {
