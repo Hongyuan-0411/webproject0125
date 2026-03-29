@@ -2971,7 +2971,12 @@
       const hasStructuredLyrics = !!(firstItem && Array.isArray(firstItem.steps_lyrics) && firstItem.steps_lyrics.length === 4);
 
       if (hasStructuredLyrics) {
-        const stepsLyrics = firstItem.steps_lyrics.map(s => String(s ?? ''));
+        const stepsLyrics = firstItem.steps_lyrics.map((item, index) => {
+          if (item && typeof item === 'object') {
+            return String(item.lyrics || '').trim();
+          }
+          return String(item ?? '').trim();
+        });
         stepContents = historyData.stepContents.map((item, index) => ({
           lyrics: stepsLyrics[index] || '',
           imageUrl: item.imageUrl,
