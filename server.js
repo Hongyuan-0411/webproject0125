@@ -1971,6 +1971,7 @@ async function handler(req, res) {
             access: 'public',
             contentType: 'text/plain; charset=utf-8',
             addRandomSuffix: false,
+            allowOverwrite: true,
           });
           saved.lyricsUrl = blob.url;
         }
@@ -1986,6 +1987,7 @@ async function handler(req, res) {
                 access: 'public',
                 contentType: 'image/png',
                 addRandomSuffix: false,
+                allowOverwrite: true,
               });
               saved.imageUrl = blob.url;
             }
@@ -2005,6 +2007,7 @@ async function handler(req, res) {
                 access: 'public',
                 contentType: 'audio/mpeg',
                 addRandomSuffix: false,
+                allowOverwrite: true,
               });
               saved.audioUrl = blob.url;
             }
