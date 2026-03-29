@@ -2180,9 +2180,10 @@
         $('quotaInfo').textContent = `今日剩余：${q.remaining ?? '-'} / ${q.limit ?? '-'}（重置：${q.resetAt ? new Date(q.resetAt).toLocaleString('zh-CN') : '-'}）`;
       }
 
-      const fullLyrics = typeof lyricsData.lyrics === 'string' ? lyricsData.lyrics : '';
-      if (!fullLyrics) {
-        throw new Error('完整歌曲歌词返回为空');
+      const stepsLyrics = Array.isArray(lyricsData.steps_lyrics) ? lyricsData.steps_lyrics : null;
+      const fullLyrics = typeof lyricsData.full_lyrics === 'string' ? lyricsData.full_lyrics : '';
+      if (!stepsLyrics || stepsLyrics.length !== 4 || !fullLyrics) {
+        throw new Error('完整歌曲歌词返回结构错误');
       }
 
       // ---- 生成图片 ----
@@ -2226,9 +2227,10 @@
       }
 
       for (let i = 0; i < 4; i++) {
+        const stepLyricsItem = stepsLyrics[i] || {};
         stepContents[i] = {
-          lyrics: fullLyrics,
-          lyricsLabel: decomposedData.steps[i].step_name,
+          lyrics: stepLyricsItem.lyrics || '',
+          lyricsLabel: stepLyricsItem.lyrics || decomposedData.steps[i].step_name,
           imageUrl: croppedImages[i],
           audioUrl: audioUrl,
           audioDeleted: false,
@@ -2784,7 +2786,12 @@
       const enhancedStepContents = stepContents.map((content, index) => ({
         ...content,
         ...(index === 0 ? {
-          full_lyrics: content.lyrics
+          steps_lyrics: stepContents.map((c, idx) => ({
+            step_number: idx + 1,
+            step_name: decomposedData.steps[idx]?.step_name || `步骤${idx + 1}`,
+            lyrics: c.lyrics,
+          })),
+          full_lyrics: stepContents.map(c => c.lyrics).join('\n\n')
         } : {})
       }));
 

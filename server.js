@@ -1892,7 +1892,7 @@ async function handler(req, res) {
           stepsCount: steps.length
         });
 
-        // 使用提示词工程生成完整歌曲歌词提示词（自由文本输出）
+        // 使用提示词工程生成 4 段短儿歌提示词（JSON 输出）
         const lyricsPrompt = prompts.getCompleteSongLyricsPrompt(
           steps,
           characterName,
@@ -1901,7 +1901,6 @@ async function handler(req, res) {
           finalDuration
         );
 
-        // 调用通义千问LLM（返回纯文本歌词）
         const raw = await callQwenLLM([
           {
             role: 'user',
@@ -1909,19 +1908,43 @@ async function handler(req, res) {
           },
         ]);
 
-        // 清理LLM输出（去除可能的markdown代码块包裹）
-        let lyrics = String(raw || '').trim();
-        // 去除 ```...``` 包裹
-        const mdMatch = lyrics.match(/```(?:\w*)\s*([\s\S]*?)\s*```/);
-        if (mdMatch) lyrics = mdMatch[1].trim();
+        // 清理 markdown 代码块包裹
+        let cleaned = String(raw || '').trim();
+        const mdMatch = cleaned.match(/```(?:\w*)\s*([\s\S]*?)\s*```/);
+        if (mdMatch) cleaned = mdMatch[1].trim();
 
-        if (!lyrics) {
-          throw new Error('歌词生成结果为空');
+        let parsed;
+        try {
+          parsed = JSON.parse(cleaned);
+        } catch (e) {
+          throw new Error('歌词生成结果不是合法 JSON：' + (e?.message || e));
         }
+
+        const stepsLyrics = Array.isArray(parsed?.steps_lyrics) ? parsed.steps_lyrics : null;
+        if (!stepsLyrics || stepsLyrics.length !== 4) {
+          throw new Error('steps_lyrics 必须为长度为 4 的数组');
+        }
+
+        const normalizedStepsLyrics = stepsLyrics.map((item, index) => {
+          const stepNumber = Number(item?.step_number || index + 1);
+          const stepName = String(item?.step_name || steps[index]?.step_name || `步骤${index + 1}`).trim();
+          const lyrics = String(item?.lyrics || '').trim();
+          if (!lyrics) {
+            throw new Error(`第 ${index + 1} 段歌词为空`);
+          }
+          return {
+            step_number: stepNumber,
+            step_name: stepName,
+            lyrics,
+          };
+        });
+
+        const fullLyrics = normalizedStepsLyrics.map(item => item.lyrics).join('\n\n');
 
         return send(res, 200, {
           success: true,
-          lyrics: lyrics,
+          steps_lyrics: normalizedStepsLyrics,
+          full_lyrics: fullLyrics,
           quota: quotaResult,
         });
       } catch (e) {
@@ -2164,6 +2187,8 @@ async function handler(req, res) {
           return {
             stepIndex: index,
             lyrics: content.lyrics || null,
+            steps_lyrics: content.steps_lyrics || null,
+            full_lyrics: content.full_lyrics || null,
             imageUrl: (saved && saved.imageUrl) ? saved.imageUrl : (content.imageUrl || null),
             audioUrl: (saved && saved.audioUrl) ? saved.audioUrl : (content.audioUrl || null),
             lyricsUrl: (saved && saved.lyricsUrl) ? saved.lyricsUrl : null,
